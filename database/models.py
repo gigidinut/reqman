@@ -126,6 +126,7 @@ class Entity(Base):
         nullable=True,
         index=True,
     )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # ── Timestamps ───────────────────────────
     created_at: Mapped[datetime] = mapped_column(

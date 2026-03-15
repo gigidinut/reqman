@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -58,6 +57,7 @@ from controllers.db_controllers import (
 )
 from controllers.ai_controller import AiWorker
 from views.entity_dialogs import LinkedToPanel
+from views.rich_text_editor import RichTextEditor
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -407,15 +407,14 @@ class AddRequirementDialog(QDialog):
         self.name_input.setStyleSheet(INPUT_STYLE)
         layout.addWidget(self.name_input)
 
-        # ── Body (main requirement statement) ────────────────────
+        # ── Body (main requirement statement, rich text) ─────────
         layout.addWidget(QLabel("Body"))
-        self.body_input = QTextEdit()
-        self.body_input.setPlaceholderText(
-            "The system shall..."
+        self.body_editor = RichTextEditor(
+            placeholder="The system shall...",
+            max_height=160,
+            parent=self,
         )
-        self.body_input.setStyleSheet(INPUT_STYLE)
-        self.body_input.setMaximumHeight(100)
-        layout.addWidget(self.body_input)
+        layout.addWidget(self.body_editor)
 
         # ── Status + Priority row ────────────────────────────────
         status_prio_row = QHBoxLayout()
@@ -515,7 +514,7 @@ class AddRequirementDialog(QDialog):
         Disables the button and shows a loading state while the LLM
         runs inference.  The result or error arrives via signals.
         """
-        body = self.body_input.toPlainText().strip()
+        body = self.body_editor.get_plain_text()
         if not body:
             _show_error(self.feedback, "Write a requirement in the Body field before checking with AI.")
             return
@@ -670,7 +669,7 @@ class AddRequirementDialog(QDialog):
             return
 
         req_id = self.req_id_input.text().strip() or None
-        body = self.body_input.toPlainText().strip() or None
+        body = self.body_editor.get_html() or None
         status = self.status_combo.currentText()
         priority = self.priority_combo.currentText()
         test_plan_path = self.file_widget.get_path() or None
@@ -791,13 +790,15 @@ class EditRequirementDialog(QDialog):
         self.name_input.setStyleSheet(INPUT_STYLE)
         layout.addWidget(self.name_input)
 
-        # ── Body ─────────────────────────────────────────────────
+        # ── Body (rich text) ──────────────────────────────────────
         layout.addWidget(QLabel("Body"))
-        self.body_input = QTextEdit()
-        self.body_input.setPlainText(self._entity.body or "")
-        self.body_input.setStyleSheet(INPUT_STYLE)
-        self.body_input.setMaximumHeight(100)
-        layout.addWidget(self.body_input)
+        self.body_editor = RichTextEditor(
+            placeholder="The system shall...",
+            max_height=160,
+            parent=self,
+        )
+        self.body_editor.set_html(self._entity.body or "")
+        layout.addWidget(self.body_editor)
 
         # ── Status + Priority + AI buttons ───────────────────────
         status_prio_row = QHBoxLayout()
@@ -917,7 +918,7 @@ class EditRequirementDialog(QDialog):
 
     def _on_ai_check(self):
         """Launch the AI evaluation in a background thread."""
-        body = self.body_input.toPlainText().strip()
+        body = self.body_editor.get_plain_text()
         if not body:
             _show_error(self.feedback, "Write a requirement in the Body field before checking with AI.")
             return
@@ -1061,7 +1062,7 @@ class EditRequirementDialog(QDialog):
             return
 
         req_id = self.req_id_input.text().strip() or None
-        body = self.body_input.toPlainText().strip() or None
+        body = self.body_editor.get_html() or None
         status = self.status_combo.currentText()
         priority = self.priority_combo.currentText()
         test_plan_path = self.file_widget.get_path() or None

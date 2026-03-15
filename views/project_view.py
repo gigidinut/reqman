@@ -73,6 +73,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -152,6 +153,21 @@ TOPBAR_BTN_STYLE = """
 """
 
 SEARCH_STYLE = "padding: 7px; font-size: 13px;"
+
+VIEW_TOGGLE_ACTIVE = """
+    QPushButton {
+        background-color: #6c5ce7;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        padding: 6px 14px;
+        font-size: 13px;
+        font-weight: 600;
+    }
+    QPushButton:hover { background-color: #5a4bd1; }
+"""
+
+VIEW_TOGGLE_INACTIVE = TOPBAR_BTN_STYLE
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -344,8 +360,12 @@ class ProjectScreen(QMainWindow):
         # Left panel — search + tree + buttons.
         self.splitter.addWidget(self._build_left_panel())
 
-        # Central content area — blank placeholder for future forms.
-        self.splitter.addWidget(self._build_central_placeholder())
+        # Central content area — stacked widget: entity detail (0) + document view (1).
+        self.content_stack = QStackedWidget()
+        self.content_stack.addWidget(self._build_entity_detail_view())   # index 0
+        self.content_stack.addWidget(self._build_document_view())        # index 1
+        self.content_stack.setCurrentIndex(0)
+        self.splitter.addWidget(self.content_stack)
 
         # Set initial proportions: ~30% left, ~70% right.
         self.splitter.setSizes([300, 700])
@@ -378,6 +398,16 @@ class ProjectScreen(QMainWindow):
 
         layout.addStretch(1)
 
+        # ── View toggle button ───────────────────────────────────
+        self.view_toggle_btn = QPushButton("📄  Document View")
+        self.view_toggle_btn.setStyleSheet(VIEW_TOGGLE_INACTIVE)
+        self.view_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.view_toggle_btn.setToolTip("Switch between Entity View and Document View")
+        self.view_toggle_btn.clicked.connect(self._on_toggle_view)
+        layout.addWidget(self.view_toggle_btn)
+
+        layout.addSpacing(12)
+
         # ── User label (right side) ─────────────────────────────
         user_label = QLabel(f"{self._user.display_name}")
         user_label.setStyleSheet("color: #aaa; font-size: 13px;")
@@ -405,13 +435,20 @@ class ProjectScreen(QMainWindow):
         self.search_input.textChanged.connect(self._on_search_changed)
         layout.addWidget(self.search_input)
 
-        # ── Tree widget ──────────────────────────────────────────
+        # ── Tree widget (with drag-and-drop reparenting) ─────────
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setAnimated(True)
         self.tree.setIndentation(20)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.tree.setDragDropMode(QTreeWidget.InternalMove)
+        self.tree.setDefaultDropAction(Qt.MoveAction)
         # Selecting an item updates the context buttons.
         self.tree.currentItemChanged.connect(self._on_tree_selection_changed)
+        # Intercept drops to update the database.
+        self.tree.dropEvent = self._on_tree_drop
         layout.addWidget(self.tree, stretch=1)
 
         # ── Separator line ───────────────────────────────────────
@@ -494,10 +531,10 @@ class ProjectScreen(QMainWindow):
 
         return panel
 
-    # ── Central placeholder ──────────────────────────────────────
+    # ── Entity Detail View (index 0 of content_stack) ───────────
 
-    def _build_central_placeholder(self) -> QWidget:
-        """Build the central detail viewer panel.
+    def _build_entity_detail_view(self) -> QWidget:
+        """Build the entity detail viewer panel.
 
         Uses a QScrollArea containing a QVBoxLayout of QLabels.  When a
         tree item is selected, `_display_entity_details()` clears and
@@ -535,6 +572,194 @@ class ProjectScreen(QMainWindow):
         container_layout.addWidget(self.detail_scroll)
 
         return container
+
+    # ── Document View (index 1 of content_stack) ─────────────────
+
+    def _build_document_view(self) -> QWidget:
+        """Build the document-centric read-only view.
+
+        Contains a refresh button and a QTextEdit in read-only mode
+        that renders the full project hierarchy as a styled HTML document.
+        """
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # ── Refresh toolbar ──────────────────────────────────────
+        toolbar = QWidget()
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(12, 8, 12, 8)
+
+        doc_title = QLabel("Document View")
+        doc_title_font = QFont()
+        doc_title_font.setPointSize(13)
+        doc_title_font.setBold(True)
+        doc_title.setFont(doc_title_font)
+        tb_layout.addWidget(doc_title)
+
+        tb_layout.addStretch()
+
+        refresh_btn = QPushButton("🔄  Refresh Document")
+        refresh_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.setToolTip("Regenerate the document from the database")
+        refresh_btn.clicked.connect(self._generate_document)
+        tb_layout.addWidget(refresh_btn)
+
+        layout.addWidget(toolbar)
+
+        # ── Document content ─────────────────────────────────────
+        from PySide6.QtWidgets import QTextBrowser
+        self.doc_browser = QTextBrowser()
+        self.doc_browser.setReadOnly(True)
+        self.doc_browser.setOpenExternalLinks(False)
+        self.doc_browser.setStyleSheet("padding: 16px; font-size: 14px;")
+        layout.addWidget(self.doc_browser)
+
+        return container
+
+    # ─────────────────────────────────────────────────────────────
+    # Document Generation
+    # ─────────────────────────────────────────────────────────────
+
+    def _on_toggle_view(self):
+        """Toggle between Entity View (index 0) and Document View (index 1)."""
+        if self.content_stack.currentIndex() == 0:
+            # Switching TO document view — generate it.
+            self._generate_document()
+            self.content_stack.setCurrentIndex(1)
+            self.view_toggle_btn.setText("📋  Entity View")
+            self.view_toggle_btn.setStyleSheet(VIEW_TOGGLE_ACTIVE)
+        else:
+            # Switching BACK to entity view.
+            self.content_stack.setCurrentIndex(0)
+            self.view_toggle_btn.setText("📄  Document View")
+            self.view_toggle_btn.setStyleSheet(VIEW_TOGGLE_INACTIVE)
+
+    def _generate_document(self):
+        """Build the full project document HTML and load it into the browser."""
+        html_parts = []
+        html_parts.append(
+            "<div style='max-width: 900px; margin: 0 auto; "
+            "font-family: Segoe UI, Arial, sans-serif;'>"
+        )
+
+        # ── Project title ────────────────────────────────────────
+        html_parts.append(
+            f"<h1 style='text-align: center; border-bottom: 3px solid #6c5ce7; "
+            f"padding-bottom: 12px; margin-bottom: 24px;'>"
+            f"{self._project.name}</h1>"
+        )
+
+        # ── Recurse through the hierarchy ────────────────────────
+        children = get_children(self._project.id)
+        for child in children:
+            self._render_entity_to_html(child, html_parts, depth=1)
+
+        html_parts.append("</div>")
+        full_html = "\n".join(html_parts)
+        self.doc_browser.setHtml(full_html)
+
+    def _render_entity_to_html(self, entity, parts: list, depth: int):
+        """Recursively render an entity and its children into HTML parts.
+
+        Each depth level adds 24px of left-indentation, mirroring the
+        tree view's visual hierarchy.
+        """
+        info = ENTITY_DISPLAY.get(entity.entity_type, {})
+        icon = info.get("icon", "")
+        indent = (depth - 1) * 24
+
+        if entity.entity_type == "requirement":
+            self._render_requirement_to_html(entity, parts, indent)
+        else:
+            # ── Section header ───────────────────────────────────
+            header_styles = {
+                1: ("font-size: 22px; color: #5dade2; border-bottom: 2px solid #5dade2; "
+                    "padding-bottom: 6px; margin-top: 28px; margin-bottom: 12px;"),
+                2: ("font-size: 18px; color: #48c9b0; border-bottom: 1px solid #48c9b0; "
+                    "padding-bottom: 4px; margin-top: 22px; margin-bottom: 10px;"),
+                3: ("font-size: 15px; color: #f5b041; "
+                    "margin-top: 18px; margin-bottom: 8px;"),
+            }
+            style = header_styles.get(depth, header_styles[3])
+            tag = f"h{min(depth, 3)}"
+            parts.append(
+                f"<div style='margin-left: {indent}px;'>"
+                f"<{tag} style='{style}'>{icon} {entity.name}</{tag}>"
+            )
+
+            # ── Description (rich text HTML) ─────────────────────
+            if entity.description:
+                from views.rich_text_editor import _html_from_storage
+                desc_html = _html_from_storage(entity.description)
+                desc_content = self._extract_body_content(desc_html)
+                parts.append(
+                    f"<div style='margin-bottom: 12px; "
+                    f"color: #ccc; font-size: 13px;'>{desc_content}</div>"
+                )
+
+            parts.append("</div>")
+
+            # ── Recurse into children ────────────────────────────
+            children = get_children(entity.id)
+            for child in children:
+                self._render_entity_to_html(child, parts, depth + 1)
+
+    def _render_requirement_to_html(self, entity, parts: list, indent: int):
+        """Render a single requirement as a styled box in the document."""
+        from views.rich_text_editor import _html_from_storage
+
+        req_id = ""
+        if hasattr(entity, "req_id") and entity.req_id:
+            req_id = entity.req_id
+
+        # ── Header line: ID + Name ───────────────────────────────
+        header = f"<b>{req_id}</b>" if req_id else ""
+        header += f"  {entity.name}" if header else f"<b>{entity.name}</b>"
+
+        # ── Body (rich text) ─────────────────────────────────────
+        body_html = ""
+        if hasattr(entity, "body") and entity.body:
+            resolved = _html_from_storage(entity.body)
+            body_html = self._extract_body_content(resolved)
+
+        parts.append(
+            f"<div style='margin-left: {indent}px;'>"
+            f"<div style='border: 1px solid #555; border-left: 4px solid #af7ac5; "
+            f"border-radius: 6px; padding: 14px 16px; margin: 10px 0 14px 0; "
+            f"background-color: rgba(175, 122, 197, 0.06);'>"
+            f"<div style='margin-bottom: 8px;'>"
+            f"📋 {header}</div>"
+        )
+
+        if body_html:
+            parts.append(
+                f"<div style='font-size: 13px; line-height: 1.5;'>"
+                f"{body_html}</div>"
+            )
+
+        parts.append("</div></div>")
+
+    @staticmethod
+    def _extract_body_content(html: str) -> str:
+        """Extract the inner content from a full QTextEdit HTML document.
+
+        QTextEdit.toHtml() produces a full <!DOCTYPE> document with <head>
+        and <body> tags.  For embedding inside our document view, we only
+        need the content inside <body>...</body>.
+        """
+        if "<body" not in html.lower():
+            return html
+
+        import re
+        match = re.search(
+            r"<body[^>]*>(.*)</body>", html, re.DOTALL | re.IGNORECASE
+        )
+        if match:
+            return match.group(1).strip()
+        return html
 
     # ─────────────────────────────────────────────────────────────
     # Detail Viewer — display entity details in the central panel
@@ -601,6 +826,26 @@ class ProjectScreen(QMainWindow):
         row_layout.addWidget(val_label, stretch=1)
         self.detail_layout.addWidget(row)
 
+    def _add_detail_rich_field(self, name: str, html_content: str):
+        """Add a labelled field with rendered HTML content (for rich text descriptions/bodies)."""
+        from views.rich_text_editor import _html_from_storage
+        from PySide6.QtWidgets import QTextBrowser
+
+        label = QLabel(f"<b>{name}:</b>")
+        label.setStyleSheet("font-size: 13px;")
+        self.detail_layout.addWidget(label)
+
+        browser = QTextBrowser()
+        browser.setReadOnly(True)
+        browser.setOpenExternalLinks(False)
+        browser.setFrameShape(QFrame.NoFrame)
+        browser.setStyleSheet("font-size: 13px; background: transparent;")
+        browser.setMaximumHeight(200)
+
+        resolved = _html_from_storage(html_content)
+        browser.setHtml(resolved)
+        self.detail_layout.addWidget(browser)
+
     def _add_detail_separator(self):
         """Add a horizontal line separator."""
         sep = QFrame()
@@ -638,7 +883,10 @@ class ProjectScreen(QMainWindow):
         self._add_detail_field("Status", entity.status)
         if entity.description and entity.entity_type != "requirement":
             # For requirements, body is shown separately below.
-            self._add_detail_field("Description", entity.description)
+            if "<" in entity.description:
+                self._add_detail_rich_field("Description", entity.description)
+            else:
+                self._add_detail_field("Description", entity.description)
 
         # ── Requirement-specific fields ──────────────────────────
         if entity.entity_type == "requirement":
@@ -647,7 +895,10 @@ class ProjectScreen(QMainWindow):
             if hasattr(entity, "req_id") and entity.req_id:
                 self._add_detail_field("Requirement ID", entity.req_id)
             if hasattr(entity, "body") and entity.body:
-                self._add_detail_field("Body", entity.body)
+                if "<" in entity.body:
+                    self._add_detail_rich_field("Body", entity.body)
+                else:
+                    self._add_detail_field("Body", entity.body)
             if hasattr(entity, "priority") and entity.priority:
                 self._add_detail_field("Priority", entity.priority)
             if hasattr(entity, "ai_score") and entity.ai_score:
@@ -1134,4 +1385,191 @@ class ProjectScreen(QMainWindow):
                 return True
             if self._select_item_by_entity_id(child, entity_id):
                 return True
+        return False
+
+    # ─────────────────────────────────────────────────────────────
+    # Drag-and-Drop Reparenting & Reordering
+    # ─────────────────────────────────────────────────────────────
+
+    def _on_tree_drop(self, event):
+        """Handle a drag-and-drop within the tree.
+
+        Uses the drop-indicator position to decide:
+          - OnItem      → reparent as a child of the target.
+          - AboveItem   → place before the target (same parent as target).
+          - BelowItem   → place after the target (same parent as target).
+          - OnViewport  → move to top-level (project root).
+
+        Special case: BelowItem on an expanded item that has children is
+        treated as OnItem (Qt visually shows this as "insert as first
+        child"), matching user expectation.
+        """
+        from PySide6.QtWidgets import QAbstractItemView
+        _ON = QAbstractItemView.DropIndicatorPosition.OnItem
+        _BELOW = QAbstractItemView.DropIndicatorPosition.BelowItem
+        _VIEWPORT = QAbstractItemView.DropIndicatorPosition.OnViewport
+
+        dragged_item = self.tree.currentItem()
+        if dragged_item is None:
+            event.ignore()
+            return
+        dragged_entity = dragged_item.data(0, Qt.UserRole)
+        if dragged_entity is None:
+            event.ignore()
+            return
+
+        target_item = self.tree.itemAt(event.position().toPoint())
+        drop_pos = self.tree.dropIndicatorPosition()
+
+        # ── Drop on empty viewport → move to project root ────────
+        if target_item is None or drop_pos == _VIEWPORT:
+            self._drop_to_root(dragged_entity, event)
+            return
+
+        target_entity = target_item.data(0, Qt.UserRole)
+        if target_entity is None or target_entity.id == dragged_entity.id:
+            event.ignore()
+            return
+
+        # ── Circular-reference guard ─────────────────────────────
+        if self._is_descendant_of(target_item, dragged_item):
+            QMessageBox.warning(
+                self, "Invalid Move",
+                "Cannot move an entity under one of its own descendants."
+            )
+            event.ignore()
+            return
+
+        # ── BelowItem on an expanded node with children → treat as OnItem
+        if (drop_pos == _BELOW
+                and target_item.isExpanded()
+                and target_item.childCount() > 0):
+            drop_pos = _ON
+
+        if drop_pos == _ON:
+            # ── Drop ON an item → reparent as child ──────────────
+            if target_entity.entity_type == "requirement":
+                QMessageBox.warning(
+                    self, "Invalid Move",
+                    "Requirements are leaf nodes and cannot have children."
+                )
+                event.ignore()
+                return
+
+            new_parent_id = target_entity.id
+            siblings = get_children(new_parent_id)
+            new_order = (max((s.sort_order for s in siblings), default=0) + 1)
+            self._persist_move(dragged_entity, new_parent_id, new_order, event)
+
+        else:
+            # ── Drop ABOVE or BELOW an item → same parent, reorder ─
+            target_parent = target_item.parent()
+            new_parent_id = (
+                target_parent.data(0, Qt.UserRole).id
+                if target_parent is not None
+                else self._project.id
+            )
+
+            # If the new parent is a requirement, reject.
+            if target_parent is not None:
+                parent_entity = target_parent.data(0, Qt.UserRole)
+                if parent_entity and parent_entity.entity_type == "requirement":
+                    event.ignore()
+                    return
+
+            # Fetch current siblings and compute new sort_order values.
+            siblings = get_children(new_parent_id)
+            # Build ordered list excluding the dragged entity.
+            ordered = [s for s in siblings if s.id != dragged_entity.id]
+
+            # Find the insertion index based on the target's position.
+            insert_idx = 0
+            for i, s in enumerate(ordered):
+                if s.id == target_entity.id:
+                    if drop_pos == _BELOW:
+                        insert_idx = i + 1
+                    else:
+                        insert_idx = i
+                    break
+            else:
+                insert_idx = len(ordered)
+
+            ordered.insert(insert_idx, dragged_entity)
+
+            # Persist new parent + all sibling sort_orders.
+            self._persist_reorder(dragged_entity, new_parent_id, ordered, event)
+
+    def _drop_to_root(self, dragged_entity, event):
+        """Move an entity to the project root (top level) at the end."""
+        new_parent_id = self._project.id
+        siblings = get_children(self._project.id)
+        new_order = (max((s.sort_order for s in siblings), default=0) + 1)
+        self._persist_move(dragged_entity, new_parent_id, new_order, event)
+
+    def _persist_move(self, dragged_entity, new_parent_id: int,
+                      new_order: int, event):
+        """Update parent_id and sort_order for a single entity."""
+        updates = {}
+        if dragged_entity.parent_id != new_parent_id:
+            updates["parent_id"] = new_parent_id
+        if dragged_entity.sort_order != new_order:
+            updates["sort_order"] = new_order
+        if not updates:
+            event.ignore()
+            return
+        try:
+            update_entity(
+                entity_id=dragged_entity.id,
+                user_id=self._user.id,
+                updates=updates,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Move Failed",
+                f"Could not move the entity:\n\n{exc}",
+            )
+            event.ignore()
+            return
+        event.setDropAction(Qt.IgnoreAction)
+        event.accept()
+        self._refresh_tree_preserving_state()
+
+    def _persist_reorder(self, dragged_entity, new_parent_id: int,
+                         ordered: list, event):
+        """Update parent_id for the dragged entity and sort_order for all siblings."""
+        try:
+            # Update parent if it changed.
+            if dragged_entity.parent_id != new_parent_id:
+                update_entity(
+                    entity_id=dragged_entity.id,
+                    user_id=self._user.id,
+                    updates={"parent_id": new_parent_id},
+                )
+            # Assign sequential sort_order to all siblings.
+            for idx, sibling in enumerate(ordered):
+                if sibling.sort_order != idx:
+                    update_entity(
+                        entity_id=sibling.id,
+                        user_id=self._user.id,
+                        updates={"sort_order": idx},
+                    )
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Move Failed",
+                f"Could not reorder entities:\n\n{exc}",
+            )
+            event.ignore()
+            return
+        event.setDropAction(Qt.IgnoreAction)
+        event.accept()
+        self._refresh_tree_preserving_state()
+
+    @staticmethod
+    def _is_descendant_of(item: QTreeWidgetItem, potential_ancestor: QTreeWidgetItem) -> bool:
+        """Return True if `item` is a descendant of `potential_ancestor`."""
+        parent = item.parent()
+        while parent is not None:
+            if parent is potential_ancestor:
+                return True
+            parent = parent.parent()
         return False

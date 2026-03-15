@@ -38,7 +38,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -52,6 +51,7 @@ from controllers.db_controllers import (
     unlink_entities,
     update_entity,
 )
+from views.rich_text_editor import RichTextEditor
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -495,13 +495,14 @@ class AddEntityDialog(QDialog):
         self.name_input.setStyleSheet(INPUT_STYLE)
         layout.addWidget(self.name_input)
 
-        # ── Description field ────────────────────────────────────
+        # ── Description field (rich text) ────────────────────────
         layout.addWidget(QLabel("Description (optional)"))
-        self.desc_input = QTextEdit()
-        self.desc_input.setPlaceholderText("Brief description...")
-        self.desc_input.setStyleSheet(INPUT_STYLE)
-        self.desc_input.setMaximumHeight(80)
-        layout.addWidget(self.desc_input)
+        self.desc_editor = RichTextEditor(
+            placeholder="Brief description...",
+            max_height=160,
+            parent=self,
+        )
+        layout.addWidget(self.desc_editor)
 
         # ── Linked To panel ──────────────────────────────────────
         # No self_entity_id yet (entity doesn't exist until Save).
@@ -533,7 +534,7 @@ class AddEntityDialog(QDialog):
         _clear_feedback(self.feedback)
 
         name = self.name_input.text().strip()
-        description = self.desc_input.toPlainText().strip() or None
+        description = self.desc_editor.get_html() or None
 
         if not name:
             _show_error(self.feedback, "Name is required.")
@@ -647,13 +648,15 @@ class EditEntityDialog(QDialog):
         self.name_input.setStyleSheet(INPUT_STYLE)
         layout.addWidget(self.name_input)
 
-        # ── Description field ────────────────────────────────────
+        # ── Description field (rich text) ────────────────────────
         layout.addWidget(QLabel("Description"))
-        self.desc_input = QTextEdit()
-        self.desc_input.setPlainText(self._entity.description or "")
-        self.desc_input.setStyleSheet(INPUT_STYLE)
-        self.desc_input.setMaximumHeight(80)
-        layout.addWidget(self.desc_input)
+        self.desc_editor = RichTextEditor(
+            placeholder="Brief description...",
+            max_height=160,
+            parent=self,
+        )
+        self.desc_editor.set_html(self._entity.description or "")
+        layout.addWidget(self.desc_editor)
 
         # ── Linked To panel ──────────────────────────────────────
         self.links_panel = LinkedToPanel(
@@ -696,7 +699,7 @@ class EditEntityDialog(QDialog):
         _clear_feedback(self.feedback)
 
         name = self.name_input.text().strip()
-        description = self.desc_input.toPlainText().strip() or None
+        description = self.desc_editor.get_html() or None
 
         if not name:
             _show_error(self.feedback, "Name is required.")

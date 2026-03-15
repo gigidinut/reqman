@@ -598,7 +598,7 @@ def get_children(parent_id: int) -> List[Entity]:
         stmt = (
             select(Entity)
             .where(Entity.parent_id == parent_id)
-            .order_by(Entity.name)
+            .order_by(Entity.sort_order, Entity.name)
         )
         children = session.execute(stmt).scalars().all()
         for c in children:

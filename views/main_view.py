@@ -39,6 +39,7 @@ from PySide6.QtGui import QFont, QKeyEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -65,9 +66,11 @@ from controllers.db_controllers import (
     create_entity,
     get_all_projects,
     get_user,
+    init_engine,
     update_password,
     update_user,
 )
+from controllers.config_controller import get_custom_db_path, set_custom_db_path
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -709,6 +712,15 @@ class MainScreen(QMainWindow):
         self.theme_btn.clicked.connect(self._on_toggle_theme)
         layout.addWidget(self.theme_btn)
 
+        # ── Relocate Database (admin-only) ────────────────────────
+        if self._user.username == "admin":
+            self.relocate_db_btn = QPushButton("Relocate Database")
+            self.relocate_db_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+            self.relocate_db_btn.setCursor(Qt.PointingHandCursor)
+            self.relocate_db_btn.setToolTip("Move the database file to a new location")
+            self.relocate_db_btn.clicked.connect(self._on_relocate_database)
+            layout.addWidget(self.relocate_db_btn)
+
         # Push everything else to the right.
         layout.addStretch(1)
 
@@ -831,3 +843,87 @@ class MainScreen(QMainWindow):
             project = dialog.get_selected_project()
             if project:
                 self.project_opened.emit(project)
+
+    # ─────────────────────────────────────────────────────────────
+    # Slots: Relocate Database  (admin-only)
+    # ─────────────────────────────────────────────────────────────
+
+    def _on_relocate_database(self):
+        """Let the administrator move the database file to a new directory.
+
+        Flow:
+        1. Show a directory picker.
+        2. Copy the current DB file to the chosen directory.
+        3. Update the config so the new path is used on next startup.
+        4. Reinitialise the engine to point to the new file immediately.
+        """
+        import shutil
+        from pathlib import Path
+        from database.models import Base
+
+        # Resolve current DB path (custom or default).
+        custom = get_custom_db_path()
+        if custom and Path(custom).exists():
+            current_db = Path(custom)
+        else:
+            current_db = Path(__file__).resolve().parent.parent / "data" / "reqman.db"
+
+        # Let the admin pick a destination directory.
+        new_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select New Database Location",
+            str(current_db.parent),
+        )
+        if not new_dir:
+            return  # user cancelled
+
+        new_path = Path(new_dir) / "reqman.db"
+
+        # Guard: same location — nothing to do.
+        if new_path.resolve() == current_db.resolve():
+            QMessageBox.information(
+                self,
+                "No Change",
+                "The selected directory already contains the current database.",
+            )
+            return
+
+        # Confirm with the administrator.
+        reply = QMessageBox.question(
+            self,
+            "Confirm Database Relocation",
+            f"The database will be copied to:\n\n{new_path}\n\n"
+            "The application will then use this new location.\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            # Copy the database file to the new location.
+            shutil.copy2(str(current_db), str(new_path))
+
+            # Persist the new path in config.
+            set_custom_db_path(str(new_path))
+
+            # Reinitialise the engine so all subsequent DB operations
+            # use the new file without restarting the application.
+            engine = init_engine(db_path=str(new_path), echo=False)
+            Base.metadata.create_all(engine)
+
+            QMessageBox.information(
+                self,
+                "Database Relocated",
+                f"Database successfully moved to:\n\n{new_path}\n\n"
+                "All subsequent operations will use this location.",
+            )
+            print(f"[admin] Database relocated to {new_path}")
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Relocation Failed",
+                f"Could not relocate the database:\n\n{exc}",
+            )

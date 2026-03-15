@@ -48,15 +48,31 @@ from controllers.db_controllers import (
 from views.auth_view import AuthWindow
 from views.main_view import MainScreen
 from views.project_view import ProjectScreen
+from controllers.config_controller import get_custom_db_path
 
 
 # ═══════════════════════════════════════════════════════════════════
 # DATABASE BOOTSTRAP
 # ═══════════════════════════════════════════════════════════════════
 
-# Path to the SQLite database file — stored inside a data/ directory
-# alongside the package so it's easy to find and back up.
-DB_PATH = Path(__file__).resolve().parent / "data" / "reqman.db"
+# Default path to the SQLite database file — stored inside a data/
+# directory alongside the package so it's easy to find and back up.
+_DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "reqman.db"
+
+
+def _resolve_db_path() -> Path:
+    """Return the configured database path, falling back to the default."""
+    custom = get_custom_db_path()
+    if custom:
+        p = Path(custom)
+        if p.exists():
+            return p
+        # Custom path no longer valid — fall back to default.
+        print(f"[startup] Custom DB path not found: {custom} — using default.")
+    return _DEFAULT_DB_PATH
+
+
+DB_PATH = _resolve_db_path()
 
 # Default admin credentials for first-run seeding.  The temporary flag
 # forces a password change on first login.
@@ -125,6 +141,14 @@ def bootstrap_database() -> None:
             ))
             conn.commit()
         print("[startup] Migrated: added master_test_template_path column.")
+
+    if "sort_order" not in entity_columns:
+        with engine.connect() as conn:
+            conn.execute(sa_text(
+                "ALTER TABLE entities ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+            ))
+            conn.commit()
+        print("[startup] Migrated: added sort_order column.")
 
     print(f"[startup] Database ready at {DB_PATH}")
 
