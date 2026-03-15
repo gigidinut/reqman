@@ -38,9 +38,9 @@ from PySide6.QtCore import QThread, Signal
 # ═══════════════════════════════════════════════════════════════════
 
 # Resolve the application root directory dynamically.
-# This file lives at <root>/reqman/controllers/ai_controller.py
-# so the root is two levels up.
-_APP_ROOT = Path(__file__).resolve().parent.parent.parent
+# This file lives at reqman/controllers/ai_controller.py
+# so the reqman root is one level up.
+_APP_ROOT = Path(__file__).resolve().parent.parent
 
 # Model file path — relative to the application root.
 MODEL_DIR = _APP_ROOT / "ai_model"
