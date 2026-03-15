@@ -1,0 +1,18 @@
+reqman/
+├── __init__.py
+├── main.py                          # PySide6 entry point (future)
+├── database/
+│   ├── __init__.py
+│   ├── models.py                    # ★ Complete SQLAlchemy schema
+│   └── setup_db.py                  # ★ DB init + verification script
+├── controllers/                     # CRUD logic (future)
+│   └── __init__.py
+├── views/                           # PySide6 UI classes (future)
+│   └── __init__.py
+├── utils/                           # Helpers, constants, validators
+│   └── __init__.py
+├── tests/
+│   └── __init__.py
+└── assets/
+    ├── icons/
+    └── styles/
