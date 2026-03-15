@@ -25,6 +25,7 @@ Usage
 """
 
 import os
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -252,8 +253,18 @@ class RichTextEditor(QWidget):
         return _html_to_storage(html)
 
     def get_plain_text(self) -> str:
-        """Return the editor content as plain text (no formatting)."""
-        return self.editor.toPlainText().strip()
+        """Return the editor content as clean plain text.
+
+        Strips all formatting and removes the Unicode object replacement
+        character (U+FFFC) that QTextEdit inserts for embedded images,
+        so the result is safe to pass to an AI model or any text-only consumer.
+        """
+        text = self.editor.toPlainText()
+        # Remove object replacement characters left by embedded images.
+        text = text.replace("\ufffc", "")
+        # Collapse runs of blank lines left after image removal.
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
     # ─────────────────────────────────────────────────────────────
     # Formatting Actions

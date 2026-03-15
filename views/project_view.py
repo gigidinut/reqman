@@ -62,6 +62,7 @@ from PySide6.QtGui import QFont, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -406,6 +407,14 @@ class ProjectScreen(QMainWindow):
         self.view_toggle_btn.clicked.connect(self._on_toggle_view)
         layout.addWidget(self.view_toggle_btn)
 
+        # ── Export button ─────────────────────────────────────────
+        self.export_btn = QPushButton("📤  Export Project")
+        self.export_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+        self.export_btn.setCursor(Qt.PointingHandCursor)
+        self.export_btn.setToolTip("Export the full project to PDF, TXT, DOCX, CSV, or ReqIF")
+        self.export_btn.clicked.connect(self._on_export_project)
+        layout.addWidget(self.export_btn)
+
         layout.addSpacing(12)
 
         # ── User label (right side) ─────────────────────────────
@@ -622,6 +631,53 @@ class ProjectScreen(QMainWindow):
     # ─────────────────────────────────────────────────────────────
     # Document Generation
     # ─────────────────────────────────────────────────────────────
+
+    def _on_export_project(self):
+        """Show a format-selection dialog and export the project."""
+        from controllers.export_controller import EXPORT_FORMATS
+
+        # Build a combined file filter string for the save dialog.
+        format_keys = list(EXPORT_FORMATS.keys())
+        filter_parts = [EXPORT_FORMATS[k][0] for k in format_keys]
+        combined_filter = ";;".join(filter_parts)
+
+        filepath, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Project",
+            self._project.name,
+            combined_filter,
+        )
+        if not filepath:
+            return  # user cancelled
+
+        # Determine which format was chosen.
+        export_fn = None
+        for key in format_keys:
+            if EXPORT_FORMATS[key][0] == selected_filter:
+                export_fn = EXPORT_FORMATS[key][1]
+                # Ensure the file has the correct extension.
+                expected_ext = selected_filter.split("*")[1].rstrip(")")
+                if not filepath.lower().endswith(expected_ext):
+                    filepath += expected_ext
+                break
+
+        if export_fn is None:
+            QMessageBox.warning(self, "Export", "Unknown format selected.")
+            return
+
+        try:
+            export_fn(self._project, filepath)
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"Project exported successfully to:\n\n{filepath}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Could not export the project:\n\n{exc}",
+            )
 
     def _on_toggle_view(self):
         """Toggle between Entity View (index 0) and Document View (index 1)."""
@@ -880,7 +936,8 @@ class ProjectScreen(QMainWindow):
         # ── Base fields ──────────────────────────────────────────
         self._add_detail_field("Type", type_label)
         self._add_detail_field("ID", str(entity.id))
-        self._add_detail_field("Status", entity.status)
+        if entity.entity_type == "requirement":
+            self._add_detail_field("Status", entity.status)
         if entity.description and entity.entity_type != "requirement":
             # For requirements, body is shown separately below.
             if "<" in entity.description:
