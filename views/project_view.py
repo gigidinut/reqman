@@ -939,6 +939,7 @@ class ProjectScreen(QMainWindow):
                 parent_id=parent_id,
                 parent_name=parent_name,
                 user_id=self._user.id,
+                project_id=self._project.id,
                 parent=self,
             )
             if dialog.exec() == QDialog.Accepted:
@@ -976,6 +977,7 @@ class ProjectScreen(QMainWindow):
             dialog = EditRequirementDialog(
                 entity=entity,
                 user_id=self._user.id,
+                project_id=self._project.id,
                 parent=self,
             )
             if dialog.exec() == QDialog.Accepted and dialog.was_saved():

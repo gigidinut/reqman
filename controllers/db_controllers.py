@@ -775,6 +775,62 @@ def delete_entity(*, entity_id: int, user_id: int) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# PROJECT MASTER TEST TEMPLATE
+# ═══════════════════════════════════════════════════════════════════
+
+def get_master_template_path(project_id: int) -> Optional[str]:
+    """Return the master_test_template_path for a Project, or None."""
+    with _session_scope() as session:
+        project = session.get(Project, project_id)
+        if project is None:
+            return None
+        return project.master_test_template_path
+
+
+def set_master_template_path(
+    *,
+    project_id: int,
+    path: str,
+    user_id: int,
+) -> Optional[Project]:
+    """Set or update the master_test_template_path on a Project."""
+    with _session_scope() as session:
+        project = session.get(Project, project_id)
+        if project is None:
+            return None
+
+        old_path = project.master_test_template_path
+        project.master_test_template_path = path
+
+        _audit(
+            session,
+            action="UPDATE",
+            user_id=user_id,
+            entity_id=project.id,
+            entity_type=project.entity_type,
+            entity_name=project.name,
+            details={"field": "master_test_template_path",
+                     "old": old_path, "new": path},
+        )
+
+        session.flush()
+        session.refresh(project)
+        session.expunge(project)
+        return project
+
+
+def clear_master_template_path(
+    *,
+    project_id: int,
+    user_id: int,
+) -> None:
+    """Clear the master_test_template_path (set to NULL)."""
+    set_master_template_path(
+        project_id=project_id, path=None, user_id=user_id
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
 # ENTITY LINKING  (Many-to-Many)
 # ═══════════════════════════════════════════════════════════════════
 

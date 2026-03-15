@@ -47,9 +47,12 @@ from PySide6.QtWidgets import (
 )
 
 from controllers.db_controllers import (
+    clear_master_template_path,
     create_entity,
     get_linked_entities,
+    get_master_template_path,
     link_entities,
+    set_master_template_path,
     unlink_entities,
     update_entity,
 )
@@ -88,6 +91,26 @@ DISABLED_BTN_STYLE = """
         border-radius: 5px; padding: 6px 14px;
         font-size: 12px; font-weight: 600;
     }
+"""
+
+GEN_TEST_BTN_STYLE = """
+    QPushButton {
+        background-color: #00b894; color: white; border: none;
+        border-radius: 5px; padding: 6px 14px;
+        font-size: 12px; font-weight: 600;
+    }
+    QPushButton:hover { background-color: #00a381; }
+    QPushButton:pressed { background-color: #008e6e; }
+"""
+
+CHANGE_TEMPLATE_BTN_STYLE = """
+    QPushButton {
+        background-color: #636e72; color: white; border: none;
+        border-radius: 5px; padding: 6px 14px;
+        font-size: 12px; font-weight: 600;
+    }
+    QPushButton:hover { background-color: #535c60; }
+    QPushButton:pressed { background-color: #434a4e; }
 """
 
 # Active AI button — vibrant blue-purple to signal it's functional.
@@ -334,11 +357,13 @@ class AddRequirementDialog(QDialog):
         parent_id: int,
         parent_name: str,
         user_id: int,
+        project_id: int,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self._parent_id = parent_id
         self._user_id = user_id
+        self._project_id = project_id
         self._created_entity = None
         # AI evaluation result — set when the user accepts the AI score.
         self._ai_score = None
@@ -421,11 +446,24 @@ class AddRequirementDialog(QDialog):
         self.ai_btn.clicked.connect(self._on_ai_check)
         status_prio_row.addWidget(self.ai_btn)
 
+        test_btn_row = QHBoxLayout()
+        test_btn_row.setSpacing(6)
+
         self.gen_test_btn = QPushButton("🧪 Generate Test Template")
-        self.gen_test_btn.setStyleSheet(DISABLED_BTN_STYLE)
-        self.gen_test_btn.setEnabled(False)
-        self.gen_test_btn.setToolTip("Coming soon — auto-generate test cases")
-        status_prio_row.addWidget(self.gen_test_btn)
+        self.gen_test_btn.setStyleSheet(GEN_TEST_BTN_STYLE)
+        self.gen_test_btn.setCursor(Qt.PointingHandCursor)
+        self.gen_test_btn.setToolTip("Copy the master template as a test file for this requirement")
+        self.gen_test_btn.clicked.connect(self._on_generate_test)
+        test_btn_row.addWidget(self.gen_test_btn)
+
+        self.change_template_btn = QPushButton("📝 Change Master Template")
+        self.change_template_btn.setStyleSheet(CHANGE_TEMPLATE_BTN_STYLE)
+        self.change_template_btn.setCursor(Qt.PointingHandCursor)
+        self.change_template_btn.setToolTip("Select a different master test template file for this project")
+        self.change_template_btn.clicked.connect(self._on_change_master_template)
+        test_btn_row.addWidget(self.change_template_btn)
+
+        status_prio_row.addLayout(test_btn_row)
 
         layout.addLayout(status_prio_row)
 
@@ -534,6 +572,91 @@ class AddRequirementDialog(QDialog):
         QMessageBox.warning(self, "AI Evaluation Error", error_msg)
 
     # ─────────────────────────────────────────────────────────────
+    # Generate Test Template / Change Master Template
+    # ─────────────────────────────────────────────────────────────
+
+    def _on_generate_test(self):
+        """Copy the master template to a user-chosen location."""
+        import os
+        import shutil
+
+        req_id = self.req_id_input.text().strip()
+        if not req_id:
+            QMessageBox.warning(
+                self, "Missing Requirement ID",
+                "Please enter a Requirement ID before generating a test template."
+            )
+            return
+
+        # ── Ensure a master template is set ──────────────────────
+        master_path = get_master_template_path(self._project_id)
+        if not master_path:
+            master_path = self._prompt_for_master_template()
+            if not master_path:
+                return  # user cancelled
+
+        # ── Build default save filename ──────────────────────────
+        _, ext = os.path.splitext(master_path)
+        default_name = f"{req_id}_TEST{ext}"
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Test File",
+            default_name,
+            "All Files (*)",
+        )
+        if not save_path:
+            return  # user cancelled
+
+        # ── Copy the master template ─────────────────────────────
+        try:
+            shutil.copy2(master_path, save_path)
+            QMessageBox.information(
+                self, "Test Template Generated",
+                f"Test file saved to:\n{save_path}"
+            )
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self, "Master Template Missing",
+                f"The master template file could not be found:\n\n"
+                f"{master_path}\n\n"
+                "It may have been moved or deleted. "
+                "Please select a new master template."
+            )
+            clear_master_template_path(
+                project_id=self._project_id, user_id=self._user_id
+            )
+            new_path = self._prompt_for_master_template()
+            if new_path:
+                self._on_generate_test()  # retry with the new template
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Copy Failed",
+                f"Failed to copy the template:\n\n{exc}"
+            )
+
+    def _on_change_master_template(self):
+        """Let the user pick a new master template and save it to the project."""
+        self._prompt_for_master_template()
+
+    def _prompt_for_master_template(self) -> str:
+        """Open a file dialog to select a master template; saves to DB.
+        Returns the selected path, or empty string if cancelled."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Master Test Template",
+            "",
+            "All Files (*);;Word Files (*.docx);;PDF Files (*.pdf);;Text Files (*.txt)",
+        )
+        if path:
+            set_master_template_path(
+                project_id=self._project_id,
+                path=path,
+                user_id=self._user_id,
+            )
+        return path
+
+    # ─────────────────────────────────────────────────────────────
     # Save
     # ─────────────────────────────────────────────────────────────
 
@@ -619,11 +742,13 @@ class EditRequirementDialog(QDialog):
         *,
         entity,
         user_id: int,
+        project_id: int,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self._entity = entity
         self._user_id = user_id
+        self._project_id = project_id
         self._saved = False
         # AI evaluation result — None means unchanged from DB value.
         self._ai_score = entity.ai_score if hasattr(entity, "ai_score") else None
@@ -710,11 +835,24 @@ class EditRequirementDialog(QDialog):
         self.ai_btn.clicked.connect(self._on_ai_check)
         status_prio_row.addWidget(self.ai_btn)
 
-        gen_btn = QPushButton("🧪 Generate Test Template")
-        gen_btn.setStyleSheet(DISABLED_BTN_STYLE)
-        gen_btn.setEnabled(False)
-        gen_btn.setToolTip("Coming soon — auto-generate test cases")
-        status_prio_row.addWidget(gen_btn)
+        test_btn_row = QHBoxLayout()
+        test_btn_row.setSpacing(6)
+
+        self.gen_test_btn = QPushButton("🧪 Generate Test Template")
+        self.gen_test_btn.setStyleSheet(GEN_TEST_BTN_STYLE)
+        self.gen_test_btn.setCursor(Qt.PointingHandCursor)
+        self.gen_test_btn.setToolTip("Copy the master template as a test file for this requirement")
+        self.gen_test_btn.clicked.connect(self._on_generate_test)
+        test_btn_row.addWidget(self.gen_test_btn)
+
+        self.change_template_btn = QPushButton("📝 Change Master Template")
+        self.change_template_btn.setStyleSheet(CHANGE_TEMPLATE_BTN_STYLE)
+        self.change_template_btn.setCursor(Qt.PointingHandCursor)
+        self.change_template_btn.setToolTip("Select a different master test template file for this project")
+        self.change_template_btn.clicked.connect(self._on_change_master_template)
+        test_btn_row.addWidget(self.change_template_btn)
+
+        status_prio_row.addLayout(test_btn_row)
         layout.addLayout(status_prio_row)
 
         # ── AI Score display (shows current or newly evaluated score) ─
@@ -824,6 +962,90 @@ class EditRequirementDialog(QDialog):
         self.ai_btn.setText("🤖 Check with AI")
         self.ai_btn.setStyleSheet(AI_BTN_STYLE)
         QMessageBox.warning(self, "AI Evaluation Error", error_msg)
+
+    # ─────────────────────────────────────────────────────────────
+    # Generate Test Template / Change Master Template
+    # ─────────────────────────────────────────────────────────────
+
+    def _on_generate_test(self):
+        """Copy the master template to a user-chosen location."""
+        import os
+        import shutil
+
+        req_id = self.req_id_input.text().strip()
+        if not req_id:
+            QMessageBox.warning(
+                self, "Missing Requirement ID",
+                "Please enter a Requirement ID before generating a test template."
+            )
+            return
+
+        # ── Ensure a master template is set ──────────────────────
+        master_path = get_master_template_path(self._project_id)
+        if not master_path:
+            master_path = self._prompt_for_master_template()
+            if not master_path:
+                return
+
+        # ── Build default save filename ──────────────────────────
+        _, ext = os.path.splitext(master_path)
+        default_name = f"{req_id}_TEST{ext}"
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Test File",
+            default_name,
+            "All Files (*)",
+        )
+        if not save_path:
+            return
+
+        # ── Copy the master template ─────────────────────────────
+        try:
+            shutil.copy2(master_path, save_path)
+            QMessageBox.information(
+                self, "Test Template Generated",
+                f"Test file saved to:\n{save_path}"
+            )
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self, "Master Template Missing",
+                f"The master template file could not be found:\n\n"
+                f"{master_path}\n\n"
+                "It may have been moved or deleted. "
+                "Please select a new master template."
+            )
+            clear_master_template_path(
+                project_id=self._project_id, user_id=self._user_id
+            )
+            new_path = self._prompt_for_master_template()
+            if new_path:
+                self._on_generate_test()
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Copy Failed",
+                f"Failed to copy the template:\n\n{exc}"
+            )
+
+    def _on_change_master_template(self):
+        """Let the user pick a new master template and save it to the project."""
+        self._prompt_for_master_template()
+
+    def _prompt_for_master_template(self) -> str:
+        """Open a file dialog to select a master template; saves to DB."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Master Test Template",
+            "",
+            "All Files (*);;Word Files (*.docx);;PDF Files (*.pdf);;Text Files (*.txt)",
+        )
+        if path:
+            set_master_template_path(
+                project_id=self._project_id,
+                path=path,
+                user_id=self._user_id,
+            )
+        return path
 
     # ─────────────────────────────────────────────────────────────
     # Save

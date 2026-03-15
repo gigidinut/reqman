@@ -112,6 +112,20 @@ def bootstrap_database() -> None:
         Base.metadata.create_all(engine)
         print("[startup] Database rebuilt successfully.")
 
+    # ── Lightweight column migrations ──────────────────────────
+    # create_all() won't add new columns to existing tables, so we
+    # use ALTER TABLE to add any missing columns for schema evolution.
+    from sqlalchemy import text as sa_text
+    inspector = sa_inspect(engine)
+    entity_columns = {c["name"] for c in inspector.get_columns("entities")}
+    if "master_test_template_path" not in entity_columns:
+        with engine.connect() as conn:
+            conn.execute(sa_text(
+                "ALTER TABLE entities ADD COLUMN master_test_template_path VARCHAR(500)"
+            ))
+            conn.commit()
+        print("[startup] Migrated: added master_test_template_path column.")
+
     print(f"[startup] Database ready at {DB_PATH}")
 
     # ── Seed the default admin on first run ──────────────────────

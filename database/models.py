@@ -197,8 +197,10 @@ class Project(Entity):
 
     __mapper_args__ = {"polymorphic_identity": "project"}
 
-    # Project-specific columns can be added via ALTER TABLE or a
-    # secondary table joined 1-to-1 if needed later.
+    # Absolute path to the master test-template file chosen by the user.
+    master_test_template_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
 
 
 class System(Entity):
