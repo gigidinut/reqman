@@ -544,6 +544,28 @@ def create_entity(
         session.add(entity)
         session.flush()  # populate entity.id for the audit log
 
+        # ── Auto-link child to parent ─────────────────────────────
+        if parent_id is not None:
+            auto_link = EntityLink(
+                source_entity_id=entity.id,
+                target_entity_id=parent_id,
+            )
+            session.add(auto_link)
+            session.flush()
+            _audit(
+                session,
+                action="LINK",
+                user_id=user_id,
+                entity_id=entity.id,
+                entity_type=entity_type_lower,
+                entity_name=name,
+                details={
+                    "source_id": entity.id,
+                    "target_id": parent_id,
+                    "auto": True,
+                },
+            )
+
         # ── Audit log ────────────────────────────────────────────
         _audit(
             session,

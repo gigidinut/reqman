@@ -300,6 +300,182 @@ class EntityHistoryDialog(QDialog):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# ENTITY VIEWER WINDOW  (read-only popup for linked entities)
+# ═══════════════════════════════════════════════════════════════════
+
+class EntityViewerWindow(QMainWindow):
+    """Read-only popup window displaying full details of a single entity.
+
+    Opened when the user clicks a linked entity in the detail panel.
+    Shows the same fields as the right-side detail view but in its own
+    window so the user can inspect linked items without losing context.
+    """
+
+    def __init__(self, entity, parent=None):
+        super().__init__(parent)
+        self._entity = entity
+
+        info = ENTITY_DISPLAY.get(entity.entity_type, {})
+        icon = info.get("icon", "")
+        type_label = info.get("label", entity.entity_type)
+
+        self.setWindowTitle(f"{icon} {entity.name} — {type_label}")
+        self.setMinimumSize(520, 400)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+
+        self._build_ui(entity, info)
+
+    def _build_ui(self, entity, info):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        self.setCentralWidget(scroll)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(6)
+        scroll.setWidget(container)
+
+        icon = info.get("icon", "")
+        type_label = info.get("label", entity.entity_type)
+
+        # ── Heading ───────────────────────────────────────────────
+        heading = QLabel(f"{icon}  {entity.name}")
+        hfont = QFont()
+        hfont.setPointSize(16)
+        hfont.setBold(True)
+        heading.setFont(hfont)
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        # ── Base fields ───────────────────────────────────────────
+        self._add_field(layout, "Type", type_label)
+        self._add_field(layout, "ID", str(entity.id))
+        if entity.entity_type == "requirement":
+            self._add_field(layout, "Status", entity.status)
+
+        if entity.description and entity.entity_type != "requirement":
+            if "<" in entity.description:
+                self._add_rich_field(layout, "Description", entity.description)
+            else:
+                self._add_field(layout, "Description", entity.description)
+
+        # ── Requirement-specific fields ───────────────────────────
+        if entity.entity_type == "requirement":
+            sep = QFrame()
+            sep.setFrameShape(QFrame.HLine)
+            sep.setFrameShadow(QFrame.Sunken)
+            layout.addWidget(sep)
+
+            if hasattr(entity, "req_id") and entity.req_id:
+                self._add_field(layout, "Requirement ID", entity.req_id)
+            if hasattr(entity, "body") and entity.body:
+                if "<" in entity.body:
+                    self._add_rich_field(layout, "Body", entity.body)
+                else:
+                    self._add_field(layout, "Body", entity.body)
+            if hasattr(entity, "priority") and entity.priority:
+                self._add_field(layout, "Priority", entity.priority)
+            if hasattr(entity, "ai_score") and entity.ai_score:
+                self._add_field(layout, "AI Score", f"🤖 {entity.ai_score}")
+            if hasattr(entity, "rationale") and entity.rationale:
+                self._add_field(layout, "Rationale", entity.rationale)
+
+        # ── Timestamps ────────────────────────────────────────────
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep2)
+        created = entity.created_at.strftime("%Y-%m-%d %H:%M") if entity.created_at else "—"
+        updated = entity.updated_at.strftime("%Y-%m-%d %H:%M") if entity.updated_at else "—"
+        self._add_field(layout, "Created", created)
+        self._add_field(layout, "Updated", updated)
+
+        # ── Linked entities (also clickable) ──────────────────────
+        try:
+            linked = get_linked_entities(entity.id, direction="both")
+        except Exception:
+            linked = []
+
+        if linked:
+            sep3 = QFrame()
+            sep3.setFrameShape(QFrame.HLine)
+            sep3.setFrameShadow(QFrame.Sunken)
+            layout.addWidget(sep3)
+
+            lbl = QLabel(f"<b>Linked Entities ({len(linked)})</b>")
+            lbl.setStyleSheet("font-size: 13px; padding-top: 4px;")
+            layout.addWidget(lbl)
+
+            for le in linked:
+                le_info = ENTITY_DISPLAY.get(le.entity_type, {})
+                le_icon = le_info.get("icon", "•")
+                le_type = le_info.get("label", le.entity_type)
+                link_label = QLabel(
+                    f"  {le_icon}  <a style='color: #3498db; text-decoration: underline;'>"
+                    f"{le.name}</a>  <span style='color: #888;'>({le_type})</span>"
+                )
+                link_label.setStyleSheet("font-size: 12px;")
+                link_label.setCursor(Qt.PointingHandCursor)
+                link_label.setToolTip(f"Click to view: {le.name}")
+                linked_entity = le
+                link_label.mousePressEvent = (
+                    lambda ev, e=linked_entity: self._open_linked(e)
+                )
+                layout.addWidget(link_label)
+
+        layout.addStretch(1)
+
+    def _add_field(self, layout, name: str, value: str):
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+
+        name_label = QLabel(f"<b>{name}:</b>")
+        name_label.setStyleSheet("font-size: 13px; min-width: 120px;")
+        name_label.setAlignment(Qt.AlignTop)
+        row_layout.addWidget(name_label)
+
+        val_label = QLabel(value or "—")
+        val_label.setStyleSheet("font-size: 13px;")
+        val_label.setWordWrap(True)
+        val_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        row_layout.addWidget(val_label, stretch=1)
+
+        layout.addWidget(row)
+
+    def _add_rich_field(self, layout, name: str, html_content: str):
+        from views.rich_text_editor import _html_from_storage
+        from PySide6.QtWidgets import QTextBrowser
+
+        label = QLabel(f"<b>{name}:</b>")
+        label.setStyleSheet("font-size: 13px;")
+        layout.addWidget(label)
+
+        browser = QTextBrowser()
+        browser.setReadOnly(True)
+        browser.setOpenExternalLinks(False)
+        browser.setFrameShape(QFrame.NoFrame)
+        browser.setStyleSheet("font-size: 13px; background: transparent;")
+        browser.setMaximumHeight(200)
+        resolved = _html_from_storage(html_content)
+        browser.setHtml(resolved)
+        layout.addWidget(browser)
+
+    def _open_linked(self, entity):
+        """Open another viewer for a linked entity."""
+        # Refresh from DB to get full fields.
+        fresh = get_entity(entity.id)
+        if fresh is None:
+            QMessageBox.warning(self, "Not Found", "This entity no longer exists.")
+            return
+        viewer = EntityViewerWindow(fresh, parent=self)
+        viewer.show()
+
+
+# ═══════════════════════════════════════════════════════════════════
 # PROJECT SCREEN  (main workspace)
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1007,8 +1183,17 @@ class ProjectScreen(QMainWindow):
                 le_info = ENTITY_DISPLAY.get(le.entity_type, {})
                 le_icon = le_info.get("icon", "•")
                 le_type = le_info.get("label", le.entity_type)
-                link_label = QLabel(f"  {le_icon}  {le.name}  ({le_type}, id:{le.id})")
-                link_label.setStyleSheet("font-size: 12px; color: #aaa;")
+                link_label = QLabel(
+                    f"  {le_icon}  <a style='color: #3498db; text-decoration: underline;'>"
+                    f"{le.name}</a>  <span style='color: #888;'>({le_type})</span>"
+                )
+                link_label.setStyleSheet("font-size: 12px;")
+                link_label.setCursor(Qt.PointingHandCursor)
+                link_label.setToolTip(f"Click to view: {le.name}")
+                linked_entity = le
+                link_label.mousePressEvent = (
+                    lambda ev, e=linked_entity: self._open_entity_viewer(e)
+                )
                 self.detail_layout.addWidget(link_label)
 
         # Push remaining space to the bottom so content is top-aligned.
@@ -1620,6 +1805,22 @@ class ProjectScreen(QMainWindow):
         event.setDropAction(Qt.IgnoreAction)
         event.accept()
         self._refresh_tree_preserving_state()
+
+    # ─────────────────────────────────────────────────────────────
+    # Entity Viewer (linked-entity click handler)
+    # ─────────────────────────────────────────────────────────────
+
+    def _open_entity_viewer(self, entity) -> None:
+        """Open a read-only EntityViewerWindow for the given entity."""
+        fresh = get_entity(entity.id)
+        if fresh is None:
+            QMessageBox.warning(
+                self, "Not Found",
+                "This entity no longer exists in the database.",
+            )
+            return
+        viewer = EntityViewerWindow(fresh, parent=self)
+        viewer.show()
 
     @staticmethod
     def _is_descendant_of(item: QTreeWidgetItem, potential_ancestor: QTreeWidgetItem) -> bool:
