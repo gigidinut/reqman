@@ -233,6 +233,7 @@ class Requirement(Entity):
     test_plan_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     ticket_link: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     ai_score: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    generated_test_file_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
 
 # ──────────────────────────────────────────────

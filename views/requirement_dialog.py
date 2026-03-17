@@ -28,6 +28,7 @@ URL handling
 default web browser on all platforms.
 """
 
+import os
 from typing import Optional, List, Dict
 
 from PySide6.QtCore import Qt, QUrl
@@ -48,9 +49,11 @@ from PySide6.QtWidgets import (
 from controllers.db_controllers import (
     clear_master_template_path,
     create_entity,
+    get_generated_test_path,
     get_linked_entities,
     get_master_template_path,
     link_entities,
+    set_generated_test_path,
     set_master_template_path,
     unlink_entities,
     update_entity,
@@ -111,6 +114,16 @@ CHANGE_TEMPLATE_BTN_STYLE = """
     }
     QPushButton:hover { background-color: #535c60; }
     QPushButton:pressed { background-color: #434a4e; }
+"""
+
+VIEW_TEST_BTN_STYLE = """
+    QPushButton {
+        background-color: #0984e3; color: white; border: none;
+        border-radius: 5px; padding: 6px 14px;
+        font-size: 12px; font-weight: 600;
+    }
+    QPushButton:hover { background-color: #0774c9; }
+    QPushButton:pressed { background-color: #0563ad; }
 """
 
 # Active AI button — vibrant blue-purple to signal it's functional.
@@ -455,6 +468,14 @@ class AddRequirementDialog(QDialog):
         self.gen_test_btn.clicked.connect(self._on_generate_test)
         test_btn_row.addWidget(self.gen_test_btn)
 
+        self.view_test_btn = QPushButton("📄 View Test")
+        self.view_test_btn.setStyleSheet(VIEW_TEST_BTN_STYLE)
+        self.view_test_btn.setCursor(Qt.PointingHandCursor)
+        self.view_test_btn.setToolTip("Open the generated test file")
+        self.view_test_btn.clicked.connect(self._on_view_test)
+        self.view_test_btn.setVisible(False)  # hidden until a test is generated
+        test_btn_row.addWidget(self.view_test_btn)
+
         self.change_template_btn = QPushButton("📝 Change Master Template")
         self.change_template_btn.setStyleSheet(CHANGE_TEMPLATE_BTN_STYLE)
         self.change_template_btn.setCursor(Qt.PointingHandCursor)
@@ -571,12 +592,33 @@ class AddRequirementDialog(QDialog):
         QMessageBox.warning(self, "AI Evaluation Error", error_msg)
 
     # ─────────────────────────────────────────────────────────────
+    # View Test
+    # ─────────────────────────────────────────────────────────────
+
+    def _on_view_test(self):
+        """Open the generated test file with the OS default application."""
+        path = getattr(self, "_generated_test_path", "")
+        if not path:
+            return
+        try:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(path)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self, "File Not Found",
+                f"The generated test file could not be found:\n\n{path}\n\n"
+                "It may have been moved or deleted outside the application."
+            )
+            self._generated_test_path = ""
+            self.view_test_btn.setVisible(False)
+
+    # ─────────────────────────────────────────────────────────────
     # Generate Test Template / Change Master Template
     # ─────────────────────────────────────────────────────────────
 
     def _on_generate_test(self):
         """Copy the master template to a user-chosen location."""
-        import os
         import shutil
 
         req_id = self.req_id_input.text().strip()
@@ -592,47 +634,89 @@ class AddRequirementDialog(QDialog):
         if not master_path:
             master_path = self._prompt_for_master_template()
             if not master_path:
-                return  # user cancelled
+                return
 
-        # ── Build default save filename ──────────────────────────
+        existing_path = getattr(self, "_generated_test_path", "")
+
+        # ── If a test already exists, ask what to do ─────────────
+        if existing_path and os.path.isfile(existing_path):
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Test Already Exists")
+            msg.setIcon(QMessageBox.Question)
+            msg.setText(
+                "A test script has already been generated for this requirement."
+            )
+            msg.setInformativeText(
+                "Do you want to Overwrite the existing file, "
+                "Create a New one, or Cancel?"
+            )
+            overwrite_btn = msg.addButton("Overwrite", QMessageBox.YesRole)
+            new_btn = msg.addButton("Create New", QMessageBox.AcceptRole)
+            msg.addButton(QMessageBox.Cancel)
+            msg.exec()
+
+            clicked = msg.clickedButton()
+            if clicked == overwrite_btn:
+                try:
+                    shutil.copy2(master_path, existing_path)
+                    QMessageBox.information(
+                        self, "Test Template Overwritten",
+                        f"Test file overwritten at:\n{existing_path}"
+                    )
+                except FileNotFoundError:
+                    self._handle_missing_master(master_path)
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self, "Copy Failed",
+                        f"Failed to copy the template:\n\n{exc}"
+                    )
+                return
+            elif clicked == new_btn:
+                pass  # fall through to the save-as dialog below
+            else:
+                return  # cancelled
+
+        # ── Ask for save location ─────────────────────────────────
         _, ext = os.path.splitext(master_path)
         default_name = f"{req_id}_TEST{ext}"
 
         save_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Test File",
-            default_name,
-            "All Files (*)",
+            self, "Save Test File", default_name, "All Files (*)",
         )
         if not save_path:
-            return  # user cancelled
+            return
 
-        # ── Copy the master template ─────────────────────────────
         try:
             shutil.copy2(master_path, save_path)
+            self._generated_test_path = save_path
+            self.view_test_btn.setVisible(True)
             QMessageBox.information(
                 self, "Test Template Generated",
                 f"Test file saved to:\n{save_path}"
             )
         except FileNotFoundError:
-            QMessageBox.warning(
-                self, "Master Template Missing",
-                f"The master template file could not be found:\n\n"
-                f"{master_path}\n\n"
-                "It may have been moved or deleted. "
-                "Please select a new master template."
-            )
-            clear_master_template_path(
-                project_id=self._project_id, user_id=self._user_id
-            )
-            new_path = self._prompt_for_master_template()
-            if new_path:
-                self._on_generate_test()  # retry with the new template
+            self._handle_missing_master(master_path)
         except Exception as exc:
             QMessageBox.warning(
                 self, "Copy Failed",
                 f"Failed to copy the template:\n\n{exc}"
             )
+
+    def _handle_missing_master(self, master_path: str):
+        """Handle a missing master template: warn, clear, and re-prompt."""
+        QMessageBox.warning(
+            self, "Master Template Missing",
+            f"The master template file could not be found:\n\n"
+            f"{master_path}\n\n"
+            "It may have been moved or deleted. "
+            "Please select a new master template."
+        )
+        clear_master_template_path(
+            project_id=self._project_id, user_id=self._user_id
+        )
+        new_path = self._prompt_for_master_template()
+        if new_path:
+            self._on_generate_test()
 
     def _on_change_master_template(self):
         """Let the user pick a new master template and save it to the project."""
@@ -674,6 +758,7 @@ class AddRequirementDialog(QDialog):
         priority = self.priority_combo.currentText()
         test_plan_path = self.file_widget.get_path() or None
         ticket_link = self.ticket_widget.get_url() or None
+        gen_test_path = getattr(self, "_generated_test_path", "") or None
 
         # ── Step 1: Create the requirement ───────────────────────
         try:
@@ -691,6 +776,7 @@ class AddRequirementDialog(QDialog):
                     "test_plan_path": test_plan_path,
                     "ticket_link": ticket_link,
                     "ai_score": self._ai_score,
+                    "generated_test_file_path": gen_test_path,
                 },
             )
         except Exception as exc:
@@ -846,6 +932,16 @@ class EditRequirementDialog(QDialog):
         self.gen_test_btn.clicked.connect(self._on_generate_test)
         test_btn_row.addWidget(self.gen_test_btn)
 
+        self.view_test_btn = QPushButton("📄 View Test")
+        self.view_test_btn.setStyleSheet(VIEW_TEST_BTN_STYLE)
+        self.view_test_btn.setCursor(Qt.PointingHandCursor)
+        self.view_test_btn.setToolTip("Open the generated test file")
+        self.view_test_btn.clicked.connect(self._on_view_test)
+        # Show only if a generated test file already exists.
+        gen_path = getattr(self._entity, "generated_test_file_path", None) or ""
+        self.view_test_btn.setVisible(bool(gen_path))
+        test_btn_row.addWidget(self.view_test_btn)
+
         self.change_template_btn = QPushButton("📝 Change Master Template")
         self.change_template_btn.setStyleSheet(CHANGE_TEMPLATE_BTN_STYLE)
         self.change_template_btn.setCursor(Qt.PointingHandCursor)
@@ -965,12 +1061,39 @@ class EditRequirementDialog(QDialog):
         QMessageBox.warning(self, "AI Evaluation Error", error_msg)
 
     # ─────────────────────────────────────────────────────────────
+    # View Test
+    # ─────────────────────────────────────────────────────────────
+
+    def _on_view_test(self):
+        """Open the generated test file with the OS default application."""
+        path = getattr(self._entity, "generated_test_file_path", None) or ""
+        if not path:
+            return
+        try:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(path)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self, "File Not Found",
+                f"The generated test file could not be found:\n\n{path}\n\n"
+                "It may have been moved or deleted outside the application."
+            )
+            # Clear the path in the DB and hide the button.
+            set_generated_test_path(
+                requirement_id=self._entity.id,
+                path=None,
+                user_id=self._user_id,
+            )
+            self._entity.generated_test_file_path = None
+            self.view_test_btn.setVisible(False)
+
+    # ─────────────────────────────────────────────────────────────
     # Generate Test Template / Change Master Template
     # ─────────────────────────────────────────────────────────────
 
     def _on_generate_test(self):
-        """Copy the master template to a user-chosen location."""
-        import os
+        """Copy the master template, with overwrite protection."""
         import shutil
 
         req_id = self.req_id_input.text().strip()
@@ -981,52 +1104,99 @@ class EditRequirementDialog(QDialog):
             )
             return
 
-        # ── Ensure a master template is set ──────────────────────
         master_path = get_master_template_path(self._project_id)
         if not master_path:
             master_path = self._prompt_for_master_template()
             if not master_path:
                 return
 
-        # ── Build default save filename ──────────────────────────
+        existing_path = getattr(self._entity, "generated_test_file_path", None) or ""
+
+        # ── If a test already exists, ask what to do ─────────────
+        if existing_path and os.path.isfile(existing_path):
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Test Already Exists")
+            msg.setIcon(QMessageBox.Question)
+            msg.setText(
+                "A test script has already been generated for this requirement."
+            )
+            msg.setInformativeText(
+                "Do you want to Overwrite the existing file, "
+                "Create a New one, or Cancel?"
+            )
+            overwrite_btn = msg.addButton("Overwrite", QMessageBox.YesRole)
+            new_btn = msg.addButton("Create New", QMessageBox.AcceptRole)
+            msg.addButton(QMessageBox.Cancel)
+            msg.exec()
+
+            clicked = msg.clickedButton()
+            if clicked == overwrite_btn:
+                try:
+                    shutil.copy2(master_path, existing_path)
+                    QMessageBox.information(
+                        self, "Test Template Overwritten",
+                        f"Test file overwritten at:\n{existing_path}"
+                    )
+                except FileNotFoundError:
+                    self._handle_missing_master(master_path)
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self, "Copy Failed",
+                        f"Failed to copy the template:\n\n{exc}"
+                    )
+                return
+            elif clicked == new_btn:
+                pass  # fall through to save-as
+            else:
+                return
+
+        # ── Ask for save location ─────────────────────────────────
         _, ext = os.path.splitext(master_path)
         default_name = f"{req_id}_TEST{ext}"
 
         save_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Test File",
-            default_name,
-            "All Files (*)",
+            self, "Save Test File", default_name, "All Files (*)",
         )
         if not save_path:
             return
 
-        # ── Copy the master template ─────────────────────────────
         try:
             shutil.copy2(master_path, save_path)
+            # Persist immediately to DB.
+            set_generated_test_path(
+                requirement_id=self._entity.id,
+                path=save_path,
+                user_id=self._user_id,
+            )
+            self._entity.generated_test_file_path = save_path
+            self.view_test_btn.setVisible(True)
             QMessageBox.information(
                 self, "Test Template Generated",
                 f"Test file saved to:\n{save_path}"
             )
         except FileNotFoundError:
-            QMessageBox.warning(
-                self, "Master Template Missing",
-                f"The master template file could not be found:\n\n"
-                f"{master_path}\n\n"
-                "It may have been moved or deleted. "
-                "Please select a new master template."
-            )
-            clear_master_template_path(
-                project_id=self._project_id, user_id=self._user_id
-            )
-            new_path = self._prompt_for_master_template()
-            if new_path:
-                self._on_generate_test()
+            self._handle_missing_master(master_path)
         except Exception as exc:
             QMessageBox.warning(
                 self, "Copy Failed",
                 f"Failed to copy the template:\n\n{exc}"
             )
+
+    def _handle_missing_master(self, master_path: str):
+        """Handle a missing master template: warn, clear, and re-prompt."""
+        QMessageBox.warning(
+            self, "Master Template Missing",
+            f"The master template file could not be found:\n\n"
+            f"{master_path}\n\n"
+            "It may have been moved or deleted. "
+            "Please select a new master template."
+        )
+        clear_master_template_path(
+            project_id=self._project_id, user_id=self._user_id
+        )
+        new_path = self._prompt_for_master_template()
+        if new_path:
+            self._on_generate_test()
 
     def _on_change_master_template(self):
         """Let the user pick a new master template and save it to the project."""
@@ -1076,7 +1246,6 @@ class EditRequirementDialog(QDialog):
             updates["req_id"] = req_id
         if body != (self._entity.body or None):
             updates["body"] = body
-        # Also keep description in sync with body for consistency.
         if body != (self._entity.description or None):
             updates["description"] = body
         if status != (self._entity.status or "proposed"):
@@ -1087,8 +1256,6 @@ class EditRequirementDialog(QDialog):
             updates["test_plan_path"] = test_plan_path
         if ticket_link != (self._entity.ticket_link or None):
             updates["ticket_link"] = ticket_link
-        # Save the AI score if it was updated (either newly evaluated
-        # or re-evaluated — compare against the DB value).
         old_ai_score = self._entity.ai_score if hasattr(self._entity, "ai_score") else None
         if self._ai_score != (old_ai_score or None):
             updates["ai_score"] = self._ai_score

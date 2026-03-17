@@ -10,8 +10,9 @@ import json
 from pathlib import Path
 from typing import Optional
 
-# Config file sits next to the default database.
-_CONFIG_DIR = Path(__file__).resolve().parent.parent / "data"
+from controllers.paths import CONFIG_DIR
+
+_CONFIG_DIR = CONFIG_DIR
 _CONFIG_PATH = _CONFIG_DIR / "config.json"
 
 

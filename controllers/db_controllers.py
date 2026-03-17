@@ -831,6 +831,46 @@ def clear_master_template_path(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# REQUIREMENT — GENERATED TEST FILE PATH
+# ═══════════════════════════════════════════════════════════════════
+
+def get_generated_test_path(requirement_id: int) -> Optional[str]:
+    """Return the generated_test_file_path for a Requirement, or None."""
+    with _session_scope() as session:
+        req = session.get(Requirement, requirement_id)
+        if req is None:
+            return None
+        return req.generated_test_file_path
+
+
+def set_generated_test_path(
+    *,
+    requirement_id: int,
+    path: Optional[str],
+    user_id: int,
+) -> None:
+    """Set or clear the generated_test_file_path on a Requirement."""
+    with _session_scope() as session:
+        req = session.get(Requirement, requirement_id)
+        if req is None:
+            return
+
+        old_path = req.generated_test_file_path
+        req.generated_test_file_path = path
+
+        _audit(
+            session,
+            action="UPDATE",
+            user_id=user_id,
+            entity_id=req.id,
+            entity_type=req.entity_type,
+            entity_name=req.name,
+            details={"field": "generated_test_file_path",
+                     "old": old_path, "new": path},
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════
 # ENTITY LINKING  (Many-to-Many)
 # ═══════════════════════════════════════════════════════════════════
 

@@ -59,11 +59,8 @@ from PySide6.QtWidgets import (
 # Portable placeholder embedded in stored HTML instead of absolute paths.
 _MEDIA_PLACEHOLDER = "%%PROJECT_MEDIA%%"
 
-# Resolve the project_media directory relative to the app root.
-# This file lives at <root>/reqman/views/rich_text_editor.py
-# App root is two levels up → <root>/reqman
-_APP_ROOT = Path(__file__).resolve().parent.parent
-MEDIA_DIR = _APP_ROOT / "project_media"
+# Writable media directory — lives in user data, not the install folder.
+from controllers.paths import MEDIA_DIR
 
 # ── Toolbar button style ─────────────────────────────────────────
 _TB_BTN_STYLE = """

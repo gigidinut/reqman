@@ -49,15 +49,12 @@ from views.auth_view import AuthWindow
 from views.main_view import MainScreen
 from views.project_view import ProjectScreen
 from controllers.config_controller import get_custom_db_path
+from controllers.paths import DEFAULT_DB_PATH as _DEFAULT_DB_PATH
 
 
 # ═══════════════════════════════════════════════════════════════════
 # DATABASE BOOTSTRAP
 # ═══════════════════════════════════════════════════════════════════
-
-# Default path to the SQLite database file — stored inside a data/
-# directory alongside the package so it's easy to find and back up.
-_DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "reqman.db"
 
 
 def _resolve_db_path() -> Path:
@@ -141,6 +138,14 @@ def bootstrap_database() -> None:
             ))
             conn.commit()
         print("[startup] Migrated: added master_test_template_path column.")
+
+    if "generated_test_file_path" not in entity_columns:
+        with engine.connect() as conn:
+            conn.execute(sa_text(
+                "ALTER TABLE entities ADD COLUMN generated_test_file_path VARCHAR(500)"
+            ))
+            conn.commit()
+        print("[startup] Migrated: added generated_test_file_path column.")
 
     if "sort_order" not in entity_columns:
         with engine.connect() as conn:

@@ -862,11 +862,12 @@ class MainScreen(QMainWindow):
         from database.models import Base
 
         # Resolve current DB path (custom or default).
+        from controllers.paths import DEFAULT_DB_PATH
         custom = get_custom_db_path()
         if custom and Path(custom).exists():
             current_db = Path(custom)
         else:
-            current_db = Path(__file__).resolve().parent.parent / "data" / "reqman.db"
+            current_db = DEFAULT_DB_PATH
 
         # Let the admin pick a destination directory.
         new_dir = QFileDialog.getExistingDirectory(
