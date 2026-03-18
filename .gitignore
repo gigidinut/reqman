@@ -1,1 +1,13 @@
 *.gguf
+__pycache__/
+*.pyc
+*.pyo
+data/
+project_media/
+*.db
+*.csv
+main.dist/
+main.build/
+*.spec
+Thumbs.db
+.DS_Store
