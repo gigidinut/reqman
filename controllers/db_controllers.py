@@ -47,6 +47,7 @@ from database.models import (
     EntityLink,
     Element,
     Project,
+    ProjectAccess,
     Requirement,
     SubSystem,
     System,
@@ -373,6 +374,36 @@ def list_users(*, active_only: bool = True) -> List[User]:
 
         users = session.execute(stmt).scalars().all()
         # Detach all so they survive the session close.
+        for u in users:
+            session.expunge(u)
+        return users
+
+
+def search_users(
+    query: str,
+    *,
+    active_only: bool = True,
+    exclude_admin: bool = True,
+) -> List[User]:
+    """
+    Search users by partial match on username, display_name, or email.
+
+    Case-insensitive substring match.  Returns up to 50 results.
+    """
+    with _session_scope() as session:
+        stmt = select(User).order_by(User.display_name).limit(50)
+        if active_only:
+            stmt = stmt.where(User.is_active == True)  # noqa: E712
+        if exclude_admin:
+            stmt = stmt.where(User.username != "admin")
+        if query.strip():
+            pattern = f"%{query.strip()}%"
+            stmt = stmt.where(
+                (User.username.ilike(pattern))
+                | (User.display_name.ilike(pattern))
+                | (User.email.ilike(pattern))
+            )
+        users = session.execute(stmt).scalars().all()
         for u in users:
             session.expunge(u)
         return users
@@ -1141,3 +1172,248 @@ def get_full_audit_log_for_display(limit: int = 200) -> List[Dict[str, Any]]:
                 "timestamp": log_entry.timestamp.isoformat() if log_entry.timestamp else None,
             })
         return output
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PROJECT ACCESS / PERMISSIONS
+# ═══════════════════════════════════════════════════════════════════
+
+def is_admin(user) -> bool:
+    """Return True if the user is the administrator."""
+    return user.username == "admin"
+
+
+def grant_project_access(
+    *,
+    user_id: int,
+    project_id: int,
+    role: str = "member",
+    granted_by_user_id: int,
+) -> ProjectAccess:
+    """
+    Grant a user access to a project with the given role.
+
+    If the user already has access, their role is updated instead.
+
+    Args:
+        user_id:             The user receiving access.
+        project_id:          The project entity ID.
+        role:                "manager" or "member".
+        granted_by_user_id:  The user performing the action (for audit).
+
+    Returns:
+        The ProjectAccess row (detached).
+    """
+    with _session_scope() as session:
+        existing = session.execute(
+            select(ProjectAccess).where(
+                ProjectAccess.user_id == user_id,
+                ProjectAccess.project_id == project_id,
+            )
+        ).scalar_one_or_none()
+
+        if existing:
+            old_role = existing.role
+            existing.role = role
+            session.flush()
+            _audit(
+                session,
+                action="UPDATE",
+                user_id=granted_by_user_id,
+                entity_id=project_id,
+                entity_type="project",
+                entity_name=None,
+                details={
+                    "subject": "project_access",
+                    "target_user_id": user_id,
+                    "old_role": old_role,
+                    "new_role": role,
+                },
+            )
+            session.refresh(existing)
+            session.expunge(existing)
+            return existing
+
+        access = ProjectAccess(
+            user_id=user_id,
+            project_id=project_id,
+            role=role,
+        )
+        session.add(access)
+        session.flush()
+        _audit(
+            session,
+            action="CREATE",
+            user_id=granted_by_user_id,
+            entity_id=project_id,
+            entity_type="project",
+            entity_name=None,
+            details={
+                "subject": "project_access",
+                "target_user_id": user_id,
+                "role": role,
+            },
+        )
+        session.refresh(access)
+        session.expunge(access)
+        return access
+
+
+def revoke_project_access(
+    *,
+    user_id: int,
+    project_id: int,
+    revoked_by_user_id: int,
+) -> bool:
+    """
+    Remove a user's access to a project.
+
+    Returns True if a row was deleted, False if none existed.
+    """
+    with _session_scope() as session:
+        existing = session.execute(
+            select(ProjectAccess).where(
+                ProjectAccess.user_id == user_id,
+                ProjectAccess.project_id == project_id,
+            )
+        ).scalar_one_or_none()
+
+        if existing is None:
+            return False
+
+        old_role = existing.role
+        session.delete(existing)
+        session.flush()
+        _audit(
+            session,
+            action="DELETE",
+            user_id=revoked_by_user_id,
+            entity_id=project_id,
+            entity_type="project",
+            entity_name=None,
+            details={
+                "subject": "project_access",
+                "target_user_id": user_id,
+                "old_role": old_role,
+            },
+        )
+        return True
+
+
+def get_project_access(project_id: int) -> List[Dict[str, Any]]:
+    """
+    Return all access entries for a project as plain dicts.
+
+    Each dict: {user_id, username, display_name, role}.
+    """
+    with _session_scope() as session:
+        stmt = (
+            select(ProjectAccess, User)
+            .join(User, ProjectAccess.user_id == User.id)
+            .where(ProjectAccess.project_id == project_id)
+            .order_by(ProjectAccess.role, User.display_name)
+        )
+        rows = session.execute(stmt).all()
+        return [
+            {
+                "user_id": pa.user_id,
+                "username": u.username,
+                "display_name": u.display_name,
+                "role": pa.role,
+            }
+            for pa, u in rows
+        ]
+
+
+def user_can_access_project(user, project_id: int) -> bool:
+    """
+    Check whether a user may open a project.
+
+    Admin always has access.  Otherwise the user must have a
+    ProjectAccess row (any role) for the given project.
+    """
+    if is_admin(user):
+        return True
+    with _session_scope() as session:
+        row = session.execute(
+            select(ProjectAccess.id).where(
+                ProjectAccess.user_id == user.id,
+                ProjectAccess.project_id == project_id,
+            )
+        ).first()
+        return row is not None
+
+
+def user_is_project_manager(user, project_id: int) -> bool:
+    """
+    Check whether a user is a 'manager' for a given project.
+
+    Admin always counts as a manager.
+    """
+    if is_admin(user):
+        return True
+    with _session_scope() as session:
+        row = session.execute(
+            select(ProjectAccess.id).where(
+                ProjectAccess.user_id == user.id,
+                ProjectAccess.project_id == project_id,
+                ProjectAccess.role == "manager",
+            )
+        ).first()
+        return row is not None
+
+
+def get_accessible_projects(user) -> List[Project]:
+    """
+    Return the projects a user is allowed to open.
+
+    Admin sees all projects.  Everyone else sees only projects
+    where they have a ProjectAccess row.
+    """
+    if is_admin(user):
+        return get_all_projects()
+
+    with _session_scope() as session:
+        stmt = (
+            select(Project)
+            .join(ProjectAccess, ProjectAccess.project_id == Project.id)
+            .where(
+                Project.parent_id == None,  # noqa: E711
+                ProjectAccess.user_id == user.id,
+            )
+            .order_by(Project.name)
+        )
+        projects = session.execute(stmt).scalars().all()
+        for p in projects:
+            session.refresh(p)
+            session.expunge(p)
+        return projects
+
+
+def get_all_db_managers() -> List[Dict[str, Any]]:
+    """
+    Return every user who has 'manager' role on at least one project.
+
+    Returns a list of dicts: {user_id, username, display_name, project_ids}.
+    """
+    with _session_scope() as session:
+        stmt = (
+            select(ProjectAccess, User)
+            .join(User, ProjectAccess.user_id == User.id)
+            .where(ProjectAccess.role == "manager")
+            .order_by(User.display_name)
+        )
+        rows = session.execute(stmt).all()
+
+        # Group by user
+        managers: Dict[int, Dict[str, Any]] = {}
+        for pa, u in rows:
+            if u.id not in managers:
+                managers[u.id] = {
+                    "user_id": u.id,
+                    "username": u.username,
+                    "display_name": u.display_name,
+                    "project_ids": [],
+                }
+            managers[u.id]["project_ids"].append(pa.project_id)
+        return list(managers.values())

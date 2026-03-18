@@ -349,6 +349,66 @@ class AuditLog(Base):
 
 
 # ──────────────────────────────────────────────
+# ProjectAccess  (per-project permission table)
+# ──────────────────────────────────────────────
+PROJECT_ACCESS_ROLES = ("manager", "member")
+
+
+class ProjectAccess(Base):
+    """
+    Per-project access control.
+
+    Roles:
+        manager  — "Project Database Manager": can edit the project AND
+                   grant/revoke member access for that project.
+        member   — Can access and edit the project but cannot manage
+                   other users' access.
+
+    The administrator (username == "admin") has implicit access to
+    every project and is NOT stored in this table.
+    """
+
+    __tablename__ = "project_access"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    project_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("entities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(30), nullable=False, default="member")
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "project_id", name="uq_user_project"),
+        CheckConstraint(
+            f"role IN {PROJECT_ACCESS_ROLES!r}",
+            name="ck_project_access_role",
+        ),
+        Index("ix_project_access_user", "user_id"),
+        Index("ix_project_access_project", "project_id"),
+    )
+
+    user: Mapped["User"] = relationship("User")
+    project: Mapped["Entity"] = relationship("Entity")
+
+    def __repr__(self) -> str:
+        return (
+            f"<ProjectAccess user={self.user_id} project={self.project_id} "
+            f"role={self.role!r}>"
+        )
+
+
+# ──────────────────────────────────────────────
 # SQLite PRAGMA helper  (enables FK enforcement)
 # ──────────────────────────────────────────────
 def enable_sqlite_fk(dbapi_conn, connection_record):

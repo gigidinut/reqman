@@ -183,6 +183,7 @@ def bootstrap_database() -> None:
 # Module-level references to live windows so they are not garbage-collected.
 _main_screen = None
 _project_screen = None
+_auth_window = None
 
 
 def on_login_successful(user, auth_window: AuthWindow) -> None:
@@ -192,7 +193,8 @@ def on_login_successful(user, auth_window: AuthWindow) -> None:
     Hides the auth window, creates the MainScreen, and wires the
     project_opened signal to transition into the ProjectScreen.
     """
-    global _main_screen
+    global _main_screen, _auth_window
+    _auth_window = auth_window
 
     print(
         f"\n[auth] Login successful!\n"
@@ -209,6 +211,9 @@ def on_login_successful(user, auth_window: AuthWindow) -> None:
     _main_screen.project_opened.connect(
         lambda project: _open_project(project, user)
     )
+
+    # When the user logs out, return to the auth window.
+    _main_screen.logout_requested.connect(_logout)
 
     _main_screen.show()
 
@@ -252,6 +257,27 @@ def _return_to_menu() -> None:
 
     if _main_screen is not None:
         _main_screen.show()
+
+
+def _logout() -> None:
+    """
+    Close the main screen (and any open project screen) and
+    re-show the authentication window for a fresh login.
+    """
+    global _main_screen, _project_screen
+
+    print("[nav] Logging out — returning to login screen.")
+
+    if _project_screen is not None:
+        _project_screen.close()
+        _project_screen = None
+
+    if _main_screen is not None:
+        _main_screen.close()
+        _main_screen = None
+
+    if _auth_window is not None:
+        _auth_window.show()
 
 
 # ═══════════════════════════════════════════════════════════════════

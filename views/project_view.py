@@ -591,6 +591,24 @@ class ProjectScreen(QMainWindow):
         self.export_btn.clicked.connect(self._on_export_project)
         layout.addWidget(self.export_btn)
 
+        # ── Link Graph button (experimental) ──────────────────────
+        self.link_graph_btn = QPushButton("🔗  Link Graph")
+        self.link_graph_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+        self.link_graph_btn.setCursor(Qt.PointingHandCursor)
+        self.link_graph_btn.setToolTip("Visualise all entity links as a force-directed graph (experimental)")
+        self.link_graph_btn.clicked.connect(self._on_open_link_graph)
+        layout.addWidget(self.link_graph_btn)
+
+        # ── Manage Access button (admin + project managers) ───────
+        from controllers.db_controllers import is_admin, user_is_project_manager
+        if is_admin(self._user) or user_is_project_manager(self._user, self._project.id):
+            self.manage_access_btn = QPushButton("🔒  Manage Access")
+            self.manage_access_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+            self.manage_access_btn.setCursor(Qt.PointingHandCursor)
+            self.manage_access_btn.setToolTip("Grant or revoke user access to this project")
+            self.manage_access_btn.clicked.connect(self._on_manage_access)
+            layout.addWidget(self.manage_access_btn)
+
         layout.addSpacing(12)
 
         # ── User label (right side) ─────────────────────────────
@@ -854,6 +872,22 @@ class ProjectScreen(QMainWindow):
                 "Export Failed",
                 f"Could not export the project:\n\n{exc}",
             )
+
+    def _on_open_link_graph(self):
+        """Open the force-directed link graph in a standalone window."""
+        from views.link_graph_view import LinkGraphWindow
+        self._link_graph_window = LinkGraphWindow(self._project, parent=self)
+        self._link_graph_window.show()
+
+    def _on_manage_access(self):
+        """Open the Manage Project Access dialog."""
+        from views.main_view import ManageProjectAccessDialog
+        dialog = ManageProjectAccessDialog(
+            project=self._project,
+            acting_user=self._user,
+            parent=self,
+        )
+        dialog.exec()
 
     def _on_toggle_view(self):
         """Toggle between Entity View (index 0) and Document View (index 1)."""

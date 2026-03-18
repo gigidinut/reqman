@@ -64,11 +64,18 @@ except ImportError:
 
 from controllers.db_controllers import (
     create_entity,
+    get_accessible_projects,
     get_all_projects,
+    get_project_access,
     get_user,
+    grant_project_access,
     init_engine,
+    is_admin,
+    revoke_project_access,
+    search_users,
     update_password,
     update_user,
+    user_can_access_project,
 )
 from controllers.config_controller import get_custom_db_path, set_custom_db_path
 
@@ -386,20 +393,17 @@ class AccountDialog(QDialog):
 
 class OpenProjectDialog(QDialog):
     """
-    Modal dialog that lists all existing projects from the database.
+    Modal dialog that lists projects the current user has access to.
 
-    The user selects one and clicks "Open".  The selected project's
-    entity object is retrievable via `get_selected_project()` after
-    the dialog is accepted.
-
-    If there are no projects yet, a helpful message is shown instead
-    of an empty list.
+    Admin sees all projects.  Other users see only projects where
+    they have a ProjectAccess row (manager or member).
     """
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, user, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("Open Project")
         self.setFixedSize(460, 420)
+        self._user = user
         self._selected_project = None
         self._projects = []           # populated in _load_projects
         self._build_ui()
@@ -453,9 +457,9 @@ class OpenProjectDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _load_projects(self):
-        """Fetch all projects from the database and populate the list."""
+        """Fetch projects the user has access to and populate the list."""
         try:
-            self._projects = get_all_projects()
+            self._projects = get_accessible_projects(self._user)
         except Exception as exc:
             _show_error(self.feedback, f"Error loading projects: {exc}")
             self._projects = []
@@ -620,6 +624,390 @@ class CreateProjectDialog(QDialog):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# DIALOG: Manage DB Managers  (admin-only)
+# ═══════════════════════════════════════════════════════════════════
+
+class ManageDBManagersDialog(QDialog):
+    """
+    Admin-only dialog to assign/revoke the 'Project Database Manager'
+    role.  A DB Manager can manage access for the projects they are
+    assigned to.
+
+    Layout:
+      • Left list: all non-admin users
+      • Right list: all projects
+      • Select a user + one or more projects → Assign / Revoke
+    """
+
+    def __init__(self, admin_user, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Project Database Managers")
+        self.setFixedSize(680, 520)
+        self._admin = admin_user
+        self._users = []
+        self._projects = []
+        self._build_ui()
+        self._load_data()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        heading = QLabel("Assign Project Database Managers")
+        heading.setAlignment(Qt.AlignCenter)
+        f = QFont(); f.setPointSize(15); f.setBold(True)
+        heading.setFont(f)
+        layout.addWidget(heading)
+
+        hint = QLabel(
+            "Select a user and a project, then assign them as a manager.\n"
+            "Managers can grant other users access to their assigned projects."
+        )
+        hint.setStyleSheet("color: #999; font-size: 12px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        # ── Two-column lists ──────────────────────────────────────
+        lists_row = QHBoxLayout()
+
+        # Users (with search)
+        user_col = QVBoxLayout()
+        user_col.addWidget(QLabel("Users"))
+        self.user_search = QLineEdit()
+        self.user_search.setPlaceholderText("Search by name, username, or email...")
+        self.user_search.setStyleSheet(INPUT_STYLE)
+        self.user_search.textChanged.connect(self._on_user_search_changed)
+        user_col.addWidget(self.user_search)
+        self.user_list = QListWidget()
+        self.user_list.setStyleSheet("font-size: 13px;")
+        self.user_list.currentRowChanged.connect(self._on_user_selected)
+        user_col.addWidget(self.user_list)
+        lists_row.addLayout(user_col)
+
+        # Projects
+        proj_col = QVBoxLayout()
+        proj_col.addWidget(QLabel("Projects"))
+        self.project_list = QListWidget()
+        self.project_list.setStyleSheet("font-size: 13px;")
+        self.project_list.currentRowChanged.connect(self._on_user_selected)
+        proj_col.addWidget(self.project_list)
+        lists_row.addLayout(proj_col)
+
+        layout.addLayout(lists_row)
+
+        # ── Current role label ─────────────────────────────────────
+        self.role_label = QLabel("")
+        self.role_label.setStyleSheet("font-size: 12px; color: #aaa; padding: 2px 0;")
+        layout.addWidget(self.role_label)
+
+        # ── Feedback ───────────────────────────────────────────────
+        self.feedback = _make_feedback_label()
+        layout.addWidget(self.feedback)
+
+        # ── Buttons ────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+
+        self.assign_btn = QPushButton("Assign as Manager")
+        self.assign_btn.setStyleSheet(DIALOG_BTN_STYLE)
+        self.assign_btn.setCursor(Qt.PointingHandCursor)
+        self.assign_btn.clicked.connect(self._on_assign)
+        btn_row.addWidget(self.assign_btn)
+
+        self.revoke_btn = QPushButton("Revoke Manager Role")
+        self.revoke_btn.setStyleSheet(
+            DIALOG_BTN_STYLE.replace("#3498db", "#e74c3c")
+                            .replace("#2980b9", "#c0392b")
+                            .replace("#1f6fa5", "#a93226")
+        )
+        self.revoke_btn.setCursor(Qt.PointingHandCursor)
+        self.revoke_btn.clicked.connect(self._on_revoke)
+        btn_row.addWidget(self.revoke_btn)
+
+        btn_row.addStretch()
+
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self.close_btn)
+
+        layout.addLayout(btn_row)
+
+    def _load_data(self):
+        self._populate_user_list("")
+        self._projects = get_all_projects()
+        self.project_list.clear()
+        for p in self._projects:
+            item = QListWidgetItem(p.name)
+            item.setData(Qt.UserRole, p)
+            self.project_list.addItem(item)
+
+    def _on_user_search_changed(self, text: str):
+        self._populate_user_list(text)
+
+    def _populate_user_list(self, query: str):
+        self.user_list.clear()
+        self._users = search_users(query, active_only=True, exclude_admin=True)
+        for u in self._users:
+            item = QListWidgetItem(
+                f"{u.display_name}  ({u.username})  —  {u.email or ''}"
+            )
+            item.setData(Qt.UserRole, u)
+            self.user_list.addItem(item)
+
+    def _on_user_selected(self):
+        """Update the role label when a user is selected."""
+        _clear_feedback(self.feedback)
+        user = self._get_selected_user()
+        project = self._get_selected_project()
+        if user and project:
+            self._update_role_label(user, project)
+        else:
+            self.role_label.setText("")
+
+    def _update_role_label(self, user, project):
+        access = get_project_access(project.id)
+        for entry in access:
+            if entry["user_id"] == user.id:
+                self.role_label.setText(
+                    f"Current role: {entry['role'].upper()} on '{project.name}'"
+                )
+                return
+        self.role_label.setText(f"No access to '{project.name}'")
+
+    def _get_selected_user(self):
+        item = self.user_list.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
+    def _get_selected_project(self):
+        item = self.project_list.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
+    def _on_assign(self):
+        _clear_feedback(self.feedback)
+        user = self._get_selected_user()
+        project = self._get_selected_project()
+        if not user or not project:
+            _show_error(self.feedback, "Select both a user and a project.")
+            return
+        try:
+            grant_project_access(
+                user_id=user.id,
+                project_id=project.id,
+                role="manager",
+                granted_by_user_id=self._admin.id,
+            )
+            _show_success(
+                self.feedback,
+                f"{user.display_name} is now a manager of '{project.name}'.",
+            )
+            self._update_role_label(user, project)
+        except Exception as exc:
+            _show_error(self.feedback, f"Failed: {exc}")
+
+    def _on_revoke(self):
+        _clear_feedback(self.feedback)
+        user = self._get_selected_user()
+        project = self._get_selected_project()
+        if not user or not project:
+            _show_error(self.feedback, "Select both a user and a project.")
+            return
+        try:
+            removed = revoke_project_access(
+                user_id=user.id,
+                project_id=project.id,
+                revoked_by_user_id=self._admin.id,
+            )
+            if removed:
+                _show_success(
+                    self.feedback,
+                    f"Removed {user.display_name}'s access to '{project.name}'.",
+                )
+            else:
+                _show_error(self.feedback, "User does not have access to this project.")
+            self._update_role_label(user, project)
+        except Exception as exc:
+            _show_error(self.feedback, f"Failed: {exc}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# DIALOG: Manage Project Access  (admin + project managers)
+# ═══════════════════════════════════════════════════════════════════
+
+class ManageProjectAccessDialog(QDialog):
+    """
+    Dialog for granting/revoking 'member' access to a specific project.
+
+    Usable by:
+      • Admin — for any project.
+      • Project Database Manager — for their assigned projects only.
+    """
+
+    def __init__(self, project, acting_user, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Manage Access — {project.name}")
+        self.setFixedSize(520, 480)
+        self._project = project
+        self._acting_user = acting_user
+        self._users = []
+        self._build_ui()
+        self._load_data()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        heading = QLabel(f"Access Control — {self._project.name}")
+        heading.setAlignment(Qt.AlignCenter)
+        f = QFont(); f.setPointSize(14); f.setBold(True)
+        heading.setFont(f)
+        layout.addWidget(heading)
+
+        # ── Current access list ────────────────────────────────────
+        layout.addWidget(QLabel("Users with access:"))
+        self.access_list = QListWidget()
+        self.access_list.setStyleSheet("font-size: 13px;")
+        layout.addWidget(self.access_list)
+
+        # ── Grant section ──────────────────────────────────────────
+        grant_label = QLabel("Grant access to:")
+        grant_label.setStyleSheet("font-weight: bold; padding-top: 6px;")
+        layout.addWidget(grant_label)
+
+        self.user_search = QLineEdit()
+        self.user_search.setPlaceholderText("Search by name, username, or email...")
+        self.user_search.setStyleSheet(INPUT_STYLE)
+        self.user_search.textChanged.connect(self._on_user_search_changed)
+        layout.addWidget(self.user_search)
+
+        grant_row = QHBoxLayout()
+        self.user_combo = QListWidget()
+        self.user_combo.setMaximumHeight(120)
+        self.user_combo.setStyleSheet("font-size: 13px;")
+        grant_row.addWidget(self.user_combo)
+
+        btn_col = QVBoxLayout()
+        self.grant_btn = QPushButton("Grant Member Access")
+        self.grant_btn.setStyleSheet(DIALOG_BTN_STYLE)
+        self.grant_btn.setCursor(Qt.PointingHandCursor)
+        self.grant_btn.clicked.connect(self._on_grant)
+        btn_col.addWidget(self.grant_btn)
+
+        self.revoke_btn = QPushButton("Revoke Selected")
+        self.revoke_btn.setStyleSheet(
+            DIALOG_BTN_STYLE.replace("#3498db", "#e74c3c")
+                            .replace("#2980b9", "#c0392b")
+                            .replace("#1f6fa5", "#a93226")
+        )
+        self.revoke_btn.setCursor(Qt.PointingHandCursor)
+        self.revoke_btn.clicked.connect(self._on_revoke)
+        btn_col.addWidget(self.revoke_btn)
+
+        btn_col.addStretch()
+        grant_row.addLayout(btn_col)
+        layout.addLayout(grant_row)
+
+        # ── Feedback ───────────────────────────────────────────────
+        self.feedback = _make_feedback_label()
+        layout.addWidget(self.feedback)
+
+        # ── Close button ───────────────────────────────────────────
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_row.addWidget(close_btn)
+        layout.addLayout(close_row)
+
+    def _load_data(self):
+        # Current access entries
+        self._refresh_access_list()
+
+        # All users (exclude admin and those already with access)
+        self._refresh_user_combo()
+
+    def _refresh_access_list(self):
+        self.access_list.clear()
+        access = get_project_access(self._project.id)
+        for entry in access:
+            text = (
+                f"{entry['display_name']}  ({entry['username']})  "
+                f"— {entry['role'].upper()}"
+            )
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, entry)
+            self.access_list.addItem(item)
+
+    def _on_user_search_changed(self, text: str):
+        self._refresh_user_combo(text)
+
+    def _refresh_user_combo(self, query: str = ""):
+        self.user_combo.clear()
+        access = get_project_access(self._project.id)
+        existing_ids = {e["user_id"] for e in access}
+        results = search_users(query, active_only=True, exclude_admin=True)
+        self._users = [u for u in results if u.id not in existing_ids]
+        for u in self._users:
+            item = QListWidgetItem(
+                f"{u.display_name}  ({u.username})  —  {u.email or ''}"
+            )
+            item.setData(Qt.UserRole, u)
+            self.user_combo.addItem(item)
+
+    def _on_grant(self):
+        _clear_feedback(self.feedback)
+        item = self.user_combo.currentItem()
+        if not item:
+            _show_error(self.feedback, "Select a user to grant access.")
+            return
+        user = item.data(Qt.UserRole)
+        try:
+            grant_project_access(
+                user_id=user.id,
+                project_id=self._project.id,
+                role="member",
+                granted_by_user_id=self._acting_user.id,
+            )
+            _show_success(
+                self.feedback,
+                f"Granted {user.display_name} access to this project.",
+            )
+            self._refresh_access_list()
+            self._refresh_user_combo()
+        except Exception as exc:
+            _show_error(self.feedback, f"Failed: {exc}")
+
+    def _on_revoke(self):
+        _clear_feedback(self.feedback)
+        item = self.access_list.currentItem()
+        if not item:
+            _show_error(self.feedback, "Select a user from the access list to revoke.")
+            return
+        entry = item.data(Qt.UserRole)
+        # Prevent revoking a manager if the acting user is not admin
+        if entry["role"] == "manager" and not is_admin(self._acting_user):
+            _show_error(
+                self.feedback,
+                "Only the administrator can revoke a manager's access.",
+            )
+            return
+        try:
+            revoke_project_access(
+                user_id=entry["user_id"],
+                project_id=self._project.id,
+                revoked_by_user_id=self._acting_user.id,
+            )
+            _show_success(
+                self.feedback,
+                f"Revoked {entry['display_name']}'s access.",
+            )
+            self._refresh_access_list()
+            self._refresh_user_combo()
+        except Exception as exc:
+            _show_error(self.feedback, f"Failed: {exc}")
+
+
+# ═══════════════════════════════════════════════════════════════════
 # MAIN SCREEN  (post-login hub)
 # ═══════════════════════════════════════════════════════════════════
 
@@ -712,14 +1100,23 @@ class MainScreen(QMainWindow):
         self.theme_btn.clicked.connect(self._on_toggle_theme)
         layout.addWidget(self.theme_btn)
 
-        # ── Relocate Database (admin-only) ────────────────────────
-        if self._user.username == "admin":
+        # ── Admin-only buttons ─────────────────────────────────────
+        if is_admin(self._user):
             self.relocate_db_btn = QPushButton("Relocate Database")
             self.relocate_db_btn.setStyleSheet(TOPBAR_BTN_STYLE)
             self.relocate_db_btn.setCursor(Qt.PointingHandCursor)
             self.relocate_db_btn.setToolTip("Move the database file to a new location")
             self.relocate_db_btn.clicked.connect(self._on_relocate_database)
             layout.addWidget(self.relocate_db_btn)
+
+            self.manage_managers_btn = QPushButton("Manage DB Managers")
+            self.manage_managers_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+            self.manage_managers_btn.setCursor(Qt.PointingHandCursor)
+            self.manage_managers_btn.setToolTip(
+                "Assign users as Project Database Managers"
+            )
+            self.manage_managers_btn.clicked.connect(self._on_manage_db_managers)
+            layout.addWidget(self.manage_managers_btn)
 
         # Push everything else to the right.
         layout.addStretch(1)
@@ -736,6 +1133,14 @@ class MainScreen(QMainWindow):
         self.account_btn.setToolTip("View and edit your account details")
         self.account_btn.clicked.connect(self._on_account_clicked)
         layout.addWidget(self.account_btn)
+
+        # ── Logout button ─────────────────────────────────────────
+        self.logout_btn = QPushButton("Logout")
+        self.logout_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+        self.logout_btn.setCursor(Qt.PointingHandCursor)
+        self.logout_btn.setToolTip("Log out and return to the login screen")
+        self.logout_btn.clicked.connect(self._on_logout)
+        layout.addWidget(self.logout_btn)
 
         return bar
 
@@ -782,6 +1187,10 @@ class MainScreen(QMainWindow):
             self._user = dialog.get_updated_user()
             self.welcome_label.setText(f"Welcome, {self._user.display_name}")
 
+    def _on_logout(self):
+        """Log out and return to the login screen."""
+        self.logout_requested.emit()
+
     # ─────────────────────────────────────────────────────────────
     # Slots: Theme Toggle
     # ─────────────────────────────────────────────────────────────
@@ -827,18 +1236,27 @@ class MainScreen(QMainWindow):
     # ─────────────────────────────────────────────────────────────
 
     def _on_create_project(self):
-        """Show the Create Project dialog.  On success, emit
-        `project_opened` with the new Project entity."""
+        """Show the Create Project dialog.  On success, auto-grant the
+        creator 'manager' access and emit `project_opened`."""
         dialog = CreateProjectDialog(user_id=self._user.id, parent=self)
         if dialog.exec() == QDialog.Accepted:
             project = dialog.get_created_project()
             if project:
+                # Auto-grant the creator manager access (unless admin,
+                # who has implicit access to everything).
+                if not is_admin(self._user):
+                    grant_project_access(
+                        user_id=self._user.id,
+                        project_id=project.id,
+                        role="manager",
+                        granted_by_user_id=self._user.id,
+                    )
                 self.project_opened.emit(project)
 
     def _on_open_project(self):
         """Show the Open Project dialog.  On selection, emit
         `project_opened` with the chosen Project entity."""
-        dialog = OpenProjectDialog(parent=self)
+        dialog = OpenProjectDialog(user=self._user, parent=self)
         if dialog.exec() == QDialog.Accepted:
             project = dialog.get_selected_project()
             if project:
@@ -928,3 +1346,8 @@ class MainScreen(QMainWindow):
                 "Relocation Failed",
                 f"Could not relocate the database:\n\n{exc}",
             )
+
+    def _on_manage_db_managers(self):
+        """Open the Manage DB Managers dialog (admin-only)."""
+        dialog = ManageDBManagersDialog(admin_user=self._user, parent=self)
+        dialog.exec()
