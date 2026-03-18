@@ -86,10 +86,11 @@ from PySide6.QtWidgets import (
 from controllers.db_controllers import (
     create_entity,
     delete_entity,
-    get_audit_log,
+    get_audit_log_with_user,
     get_children,
     get_entity,
     get_linked_entities,
+    get_project_audit_log,
     update_entity,
 )
 from views.entity_dialogs import AddEntityDialog, EditEntityDialog
@@ -197,20 +198,110 @@ def _collect_visible_items(item: QTreeWidgetItem) -> List[QTreeWidgetItem]:
 # DIALOG: Audit History for a single entity
 # ═══════════════════════════════════════════════════════════════════
 
+def _export_audit_entries_csv(
+    entries: list, filepath: str, field_labels: dict
+) -> None:
+    """Write a list of audit-log dicts to a CSV file.
+
+    Shared by single-entity and full-project history exports.
+    """
+    import csv
+
+    with open(filepath, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "Timestamp", "Action", "User", "Entity ID",
+            "Entity Type", "Entity Name", "Field", "Old Value", "New Value",
+        ])
+        for entry in entries:
+            if entry is None:
+                continue
+            ts = entry.get("timestamp")
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+            action = entry.get("action", "")
+            user = entry.get("display_name") or ""
+            eid = entry.get("entity_id") or ""
+            etype = entry.get("entity_type") or ""
+            ename = entry.get("entity_name") or ""
+            details = entry.get("details")
+            if not isinstance(details, dict):
+                details = {}
+
+            old = details.get("old") if isinstance(details.get("old"), dict) else {}
+            new = details.get("new") if isinstance(details.get("new"), dict) else {}
+
+            if action == "UPDATE" and old and new:
+                for field in new:
+                    label = field_labels.get(field, field)
+                    old_val = old.get(field, "") or ""
+                    new_val = new.get(field, "") or ""
+                    writer.writerow([
+                        ts_str, action, user, eid, etype, ename,
+                        label, old_val, new_val,
+                    ])
+            else:
+                # Single summary row for non-UPDATE actions
+                summary = ""
+                if action == "CREATE":
+                    summary = f"Created: {details.get('name', ename)}"
+                elif action == "DELETE":
+                    summary = f"Deleted: {details.get('name', ename)}"
+                elif action in ("LINK", "UNLINK"):
+                    src = details.get("source_id", "?")
+                    tgt = details.get("target_id", "?")
+                    auto = " (auto)" if details.get("auto") else ""
+                    verb = "Linked" if action == "LINK" else "Unlinked"
+                    summary = f"{verb}: {src} \u2192 {tgt}{auto}"
+                else:
+                    summary = str(details) if details else ""
+                writer.writerow([
+                    ts_str, action, user, eid, etype, ename,
+                    "", summary, "",
+                ])
+
+
 class EntityHistoryDialog(QDialog):
     """
     Modal dialog showing the audit history for a specific entity.
 
-    Fetches entries from `get_audit_log(entity_id=...)` and displays
-    them in a read-only QTableWidget with columns:
-      Action | Timestamp | Details
+    Columns: Action | User | Timestamp | Changes
+    The Changes column shows human-readable field-level diffs for
+    UPDATE actions (field: old → new) and summary info for others.
+
+    Includes an "Export CSV" button to save the entity's history.
     """
+
+    ACTION_COLOURS = {
+        "CREATE": "#2ecc71",
+        "UPDATE": "#3498db",
+        "DELETE": "#e74c3c",
+        "LINK":   "#f39c12",
+        "UNLINK": "#e67e22",
+    }
+
+    # Field labels for nicer display in the Changes column.
+    FIELD_LABELS = {
+        "name": "Name",
+        "description": "Description",
+        "status": "Status",
+        "req_id": "Requirement ID",
+        "priority": "Priority",
+        "rationale": "Rationale",
+        "body": "Body",
+        "test_plan_path": "Test Plan Path",
+        "ticket_link": "Ticket Link",
+        "ai_score": "AI Score",
+        "sort_order": "Sort Order",
+        "master_test_template_path": "Master Test Template",
+        "generated_test_file_path": "Generated Test File",
+    }
 
     def __init__(self, entity, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._entity = entity
+        self._entries = []
         self.setWindowTitle(f"History — {entity.name}")
-        self.setMinimumSize(600, 400)
+        self.setMinimumSize(820, 480)
         self._build_ui()
 
     def _build_ui(self):
@@ -230,73 +321,154 @@ class EntityHistoryDialog(QDialog):
 
         # ── Table ────────────────────────────────────────────────
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Action", "Timestamp", "Details"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(
+            ["Action", "User", "Timestamp", "Changes"]
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeToContents
-        )
-        self.table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeToContents
-        )
+        for col in range(3):
+            self.table.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeToContents
+            )
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.verticalHeader().setVisible(False)
+        self.table.setWordWrap(True)
         layout.addWidget(self.table)
 
-        # ── Close button ─────────────────────────────────────────
+        # ── Buttons row ──────────────────────────────────────────
+        btn_row = QHBoxLayout()
+
+        export_btn = QPushButton("Export CSV")
+        export_btn.setStyleSheet(
+            "QPushButton { background: #2c3e50; color: #ddd; border: 1px solid #555; "
+            "border-radius: 4px; padding: 6px 14px; font-size: 12px; } "
+            "QPushButton:hover { background: #34495e; }"
+        )
+        export_btn.setCursor(Qt.PointingHandCursor)
+        export_btn.clicked.connect(self._on_export_csv)
+        btn_row.addWidget(export_btn)
+
+        btn_row.addStretch()
+
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn, alignment=Qt.AlignRight)
+        btn_row.addWidget(close_btn)
+
+        layout.addLayout(btn_row)
 
         # ── Populate the table ───────────────────────────────────
         self._load_history()
 
     def _load_history(self):
-        """Fetch audit entries for this entity and fill the table rows."""
+        """Fetch audit entries and fill the table."""
         try:
-            entries = get_audit_log(entity_id=self._entity.id, limit=200)
+            self._entries = get_audit_log_with_user(
+                entity_id=self._entity.id, limit=200
+            )
         except Exception as exc:
             self.table.setRowCount(1)
             self.table.setItem(0, 0, QTableWidgetItem(f"Error: {exc}"))
             return
 
-        if not entries:
+        if not self._entries:
             self.table.setRowCount(1)
-            error_item = QTableWidgetItem("No history found for this entity.")
-            error_item.setForeground(QColor("#999"))
-            self.table.setItem(0, 0, error_item)
+            empty = QTableWidgetItem("No history found for this entity.")
+            empty.setForeground(QColor("#999"))
+            self.table.setItem(0, 0, empty)
             return
 
-        self.table.setRowCount(len(entries))
-        for row, entry in enumerate(entries):
-            # Action column — colour-coded for quick scanning.
-            action_item = QTableWidgetItem(entry.action)
-            colour_map = {
-                "CREATE": "#2ecc71",
-                "UPDATE": "#3498db",
-                "DELETE": "#e74c3c",
-                "LINK":   "#f39c12",
-                "UNLINK": "#e67e22",
-            }
-            colour = colour_map.get(entry.action, "#cccccc")
+        self.table.setRowCount(len(self._entries))
+        for row, entry in enumerate(self._entries):
+            # Action
+            action_item = QTableWidgetItem(entry["action"])
+            colour = self.ACTION_COLOURS.get(entry["action"], "#cccccc")
             action_item.setForeground(QColor(colour))
-            font = action_item.font()
-            font.setBold(True)
-            action_item.setFont(font)
+            f = action_item.font()
+            f.setBold(True)
+            action_item.setFont(f)
             self.table.setItem(row, 0, action_item)
 
-            # Timestamp column.
-            ts_str = ""
-            if entry.timestamp:
-                ts_str = entry.timestamp.strftime("%Y-%m-%d  %H:%M:%S")
-            self.table.setItem(row, 1, QTableWidgetItem(ts_str))
+            # User
+            self.table.setItem(
+                row, 1, QTableWidgetItem(entry["display_name"])
+            )
 
-            # Details column — show the raw JSON string, truncated.
-            details_str = entry.details or ""
-            if len(details_str) > 120:
-                details_str = details_str[:117] + "..."
-            self.table.setItem(row, 2, QTableWidgetItem(details_str))
+            # Timestamp
+            ts = entry.get("timestamp")
+            ts_str = ts.strftime("%Y-%m-%d  %H:%M:%S") if ts else ""
+            self.table.setItem(row, 2, QTableWidgetItem(ts_str))
+
+            # Changes — human-readable diff
+            changes_str = self._format_changes(entry)
+            self.table.setItem(row, 3, QTableWidgetItem(changes_str))
+
+        self.table.resizeRowsToContents()
+
+    def _format_changes(self, entry: dict) -> str:
+        """Produce a human-readable changes summary from an audit entry."""
+        action = entry.get("action", "")
+        details = entry.get("details")
+        if not isinstance(details, dict):
+            details = {}
+
+        old = details.get("old") if isinstance(details.get("old"), dict) else {}
+        new = details.get("new") if isinstance(details.get("new"), dict) else {}
+
+        if action == "UPDATE" and old and new:
+            parts = []
+            for field in new:
+                label = self.FIELD_LABELS.get(field, field)
+                old_val = self._truncate(str(old.get(field, "") or ""), 80)
+                new_val = self._truncate(str(new.get(field, "") or ""), 80)
+                parts.append(f"{label}: \"{old_val}\" \u2192 \"{new_val}\"")
+            return "\n".join(parts) if parts else str(details)
+
+        if action == "CREATE":
+            name = details.get("name", "")
+            parent = details.get("parent_id", "")
+            return f"Created: {name}" + (f"  (parent id={parent})" if parent else "")
+
+        if action == "DELETE":
+            return f"Deleted: {details.get('name', entry.get('entity_name', ''))}"
+
+        if action in ("LINK", "UNLINK"):
+            src = details.get("source_id", "?")
+            tgt = details.get("target_id", "?")
+            auto = " (auto)" if details.get("auto") else ""
+            verb = "Linked" if action == "LINK" else "Unlinked"
+            return f"{verb}: {src} → {tgt}{auto}"
+
+        # Fallback for other shapes
+        return str(details) if details else ""
+
+    @staticmethod
+    def _truncate(text: str, max_len: int) -> str:
+        if len(text) > max_len:
+            return text[: max_len - 3] + "..."
+        return text
+
+    def _on_export_csv(self):
+        """Export this entity's history to a CSV file."""
+        if not self._entries:
+            QMessageBox.information(self, "Export", "No history to export.")
+            return
+
+        from PySide6.QtWidgets import QFileDialog
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Entity History",
+            f"{self._entity.name}_history.csv",
+            "CSV Files (*.csv)",
+        )
+        if not filepath:
+            return
+
+        _export_audit_entries_csv(self._entries, filepath, self.FIELD_LABELS)
+        QMessageBox.information(
+            self, "Export Complete",
+            f"History exported to:\n\n{filepath}",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -609,6 +781,14 @@ class ProjectScreen(QMainWindow):
             self.manage_access_btn.clicked.connect(self._on_manage_access)
             layout.addWidget(self.manage_access_btn)
 
+        # ── Export Project History button ─────────────────────────
+        self.export_history_btn = QPushButton("📜  Export History")
+        self.export_history_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+        self.export_history_btn.setCursor(Qt.PointingHandCursor)
+        self.export_history_btn.setToolTip("Export the full change history of all project entities to CSV")
+        self.export_history_btn.clicked.connect(self._on_export_project_history)
+        layout.addWidget(self.export_history_btn)
+
         layout.addSpacing(12)
 
         # ── User label (right side) ─────────────────────────────
@@ -888,6 +1068,31 @@ class ProjectScreen(QMainWindow):
             parent=self,
         )
         dialog.exec()
+
+    def _on_export_project_history(self):
+        """Export the full change history of all project entities to CSV."""
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Project History",
+            f"{self._project.name}_full_history.csv",
+            "CSV Files (*.csv)",
+        )
+        if not filepath:
+            return
+        try:
+            entries = get_project_audit_log(self._project.id)
+            _export_audit_entries_csv(
+                entries, filepath, EntityHistoryDialog.FIELD_LABELS
+            )
+            QMessageBox.information(
+                self, "Export Complete",
+                f"Project history ({len(entries)} entries) exported to:\n\n{filepath}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Export Failed",
+                f"Could not export project history:\n\n{exc}",
+            )
 
     def _on_toggle_view(self):
         """Toggle between Entity View (index 0) and Document View (index 1)."""

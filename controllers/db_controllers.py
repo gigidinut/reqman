@@ -1137,6 +1137,106 @@ def get_audit_log(
         return entries
 
 
+def get_audit_log_with_user(
+    *,
+    entity_id: Optional[int] = None,
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve audit entries for an entity, enriched with the acting
+    user's display name.
+
+    Each dict:
+        id, action, entity_id, entity_type, entity_name,
+        details (parsed JSON dict), user_id, username, display_name,
+        timestamp (datetime object).
+    """
+    with _session_scope() as session:
+        stmt = (
+            select(AuditLog, User.username, User.display_name)
+            .outerjoin(User, AuditLog.user_id == User.id)
+            .order_by(AuditLog.timestamp.desc())
+            .limit(limit)
+        )
+        if entity_id is not None:
+            stmt = stmt.where(AuditLog.entity_id == entity_id)
+
+        rows = session.execute(stmt).all()
+        output = []
+        for entry, username, display_name in rows:
+            details = None
+            if entry.details:
+                try:
+                    details = json.loads(entry.details)
+                except (json.JSONDecodeError, TypeError):
+                    details = {"raw": entry.details}
+            output.append({
+                "id": entry.id,
+                "action": entry.action,
+                "entity_id": entry.entity_id,
+                "entity_type": entry.entity_type,
+                "entity_name": entry.entity_name,
+                "details": details,
+                "user_id": entry.user_id,
+                "username": username or "(deleted user)",
+                "display_name": display_name or "(deleted user)",
+                "timestamp": entry.timestamp,
+            })
+        return output
+
+
+def get_project_audit_log(project_id: int, limit: int = 5000) -> List[Dict[str, Any]]:
+    """
+    Return the audit log for every entity that belongs to a project.
+
+    Collects all descendant entity IDs recursively, then queries the
+    audit log for all of them (plus the project itself).
+    """
+    # Collect all entity IDs in the project tree
+    all_ids = {project_id}
+    _collect_descendant_ids(project_id, all_ids)
+
+    with _session_scope() as session:
+        stmt = (
+            select(AuditLog, User.username, User.display_name)
+            .outerjoin(User, AuditLog.user_id == User.id)
+            .where(AuditLog.entity_id.in_(all_ids))
+            .order_by(AuditLog.timestamp.desc())
+            .limit(limit)
+        )
+        rows = session.execute(stmt).all()
+        output = []
+        for entry, username, display_name in rows:
+            details = None
+            if entry.details:
+                try:
+                    details = json.loads(entry.details)
+                except (json.JSONDecodeError, TypeError):
+                    details = {"raw": entry.details}
+            output.append({
+                "id": entry.id,
+                "action": entry.action,
+                "entity_id": entry.entity_id,
+                "entity_type": entry.entity_type,
+                "entity_name": entry.entity_name,
+                "details": details,
+                "user_id": entry.user_id,
+                "username": username or "(deleted user)",
+                "display_name": display_name or "(deleted user)",
+                "timestamp": entry.timestamp,
+            })
+        return output
+
+
+def _collect_descendant_ids(parent_id: int, result: set):
+    """Recursively collect all descendant entity IDs under a parent."""
+    children = get_children(parent_id)
+    for child in children:
+        result.add(child.id)
+        if child.entity_type != "requirement":
+            _collect_descendant_ids(child.id, result)
+
+
 def get_full_audit_log_for_display(limit: int = 200) -> List[Dict[str, Any]]:
     """
     Return the complete audit log as a list of plain dictionaries,
