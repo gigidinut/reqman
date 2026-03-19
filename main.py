@@ -44,6 +44,7 @@ from controllers.db_controllers import (
     init_engine,
     create_user,
     list_users,
+    update_user,
 )
 from views.auth_view import AuthWindow
 from views.main_view import MainScreen
@@ -155,6 +156,39 @@ def bootstrap_database() -> None:
             conn.commit()
         print("[startup] Migrated: added sort_order column.")
 
+    # ── User table migrations ─────────────────────────────────
+    user_columns = {c["name"] for c in inspector.get_columns("users")}
+
+    if "is_admin" not in user_columns:
+        with engine.connect() as conn:
+            conn.execute(sa_text(
+                "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"
+            ))
+            # Set the original 'admin' user as admin if it exists.
+            conn.execute(sa_text(
+                "UPDATE users SET is_admin = 1 WHERE username = 'admin'"
+            ))
+            conn.commit()
+        print("[startup] Migrated: added is_admin column.")
+
+    if "email_verified" not in user_columns:
+        with engine.connect() as conn:
+            conn.execute(sa_text(
+                "ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 0"
+            ))
+            conn.commit()
+        print("[startup] Migrated: added email_verified column.")
+
+    # ── SecurityCode table ────────────────────────────────────
+    if "security_codes" not in actual_tables:
+        Base.metadata.tables["security_codes"].create(engine, checkfirst=True)
+        print("[startup] Created security_codes table.")
+
+    # ── RecoveryKey table ─────────────────────────────────────
+    if "recovery_keys" not in actual_tables:
+        Base.metadata.tables["recovery_keys"].create(engine, checkfirst=True)
+        print("[startup] Created recovery_keys table.")
+
     print(f"[startup] Database ready at {DB_PATH}")
 
     # ── Seed the default admin on first run ──────────────────────
@@ -166,6 +200,12 @@ def bootstrap_database() -> None:
             email="admin@reqman.local",
             password=DEFAULT_ADMIN_PASSWORD,
             temporary_password=True,  # force password change on first login
+        )
+        # Flag this user as admin.
+        update_user(
+            user_id=admin.id,
+            acting_user_id=admin.id,
+            updates={"is_admin": True},
         )
         print(
             f"[startup] Default admin account created:\n"

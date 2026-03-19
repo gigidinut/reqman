@@ -78,6 +78,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     temporary_password: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -405,6 +407,100 @@ class ProjectAccess(Base):
         return (
             f"<ProjectAccess user={self.user_id} project={self.project_id} "
             f"role={self.role!r}>"
+        )
+
+
+# ──────────────────────────────────────────────
+# SecurityCode  (email verification & password reset)
+# ──────────────────────────────────────────────
+SECURITY_CODE_PURPOSES = ("email_verify", "password_reset")
+
+
+class SecurityCode(Base):
+    """
+    Short-lived codes sent via email for verification or password reset.
+
+    Each code has a purpose, an expiry time, and a used flag.
+    Codes are single-use and expire after 15 minutes.
+    """
+
+    __tablename__ = "security_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    code: Mapped[str] = mapped_column(String(10), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(30), nullable=False)
+    used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            f"purpose IN {SECURITY_CODE_PURPOSES!r}",
+            name="ck_security_code_purpose",
+        ),
+        Index("ix_security_code_user", "user_id"),
+    )
+
+    user: Mapped["User"] = relationship("User")
+
+    def __repr__(self) -> str:
+        return (
+            f"<SecurityCode user={self.user_id} purpose={self.purpose!r} "
+            f"used={self.used}>"
+        )
+
+
+# ──────────────────────────────────────────────
+# RecoveryKey  (offline password reset backup)
+# ──────────────────────────────────────────────
+
+class RecoveryKey(Base):
+    """
+    Single-use recovery keys for offline password reset.
+
+    Generated when an account is created (or regenerated on demand).
+    Each user gets a batch of keys (e.g. 5).  Using one marks it as
+    consumed so it cannot be reused.
+
+    Key format: FROG-XXXX-XXXX-XXXX (alphanumeric, uppercase).
+    The stored value is the hash — the plaintext is shown ONCE to the user.
+    """
+
+    __tablename__ = "recovery_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    key_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_recovery_key_user", "user_id"),
+    )
+
+    user: Mapped["User"] = relationship("User")
+
+    def __repr__(self) -> str:
+        return (
+            f"<RecoveryKey user={self.user_id} used={self.used}>"
         )
 
 

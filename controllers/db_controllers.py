@@ -48,7 +48,9 @@ from database.models import (
     Element,
     Project,
     ProjectAccess,
+    RecoveryKey,
     Requirement,
+    SecurityCode,
     SubSystem,
     System,
     User,
@@ -395,7 +397,7 @@ def search_users(
         if active_only:
             stmt = stmt.where(User.is_active == True)  # noqa: E712
         if exclude_admin:
-            stmt = stmt.where(User.username != "admin")
+            stmt = stmt.where(User.is_admin == False)  # noqa: E712
         if query.strip():
             pattern = f"%{query.strip()}%"
             stmt = stmt.where(
@@ -508,6 +510,7 @@ def create_entity(
     description: Optional[str] = None,
     status: str = "draft",
     extra_fields: Optional[Dict[str, Any]] = None,
+    acting_user=None,
 ) -> Entity:
     """
     Create any entity in the hierarchy.
@@ -553,6 +556,19 @@ def create_entity(
                     "Requirements are leaf nodes and cannot have children. "
                     f"Parent id={parent_id} is a Requirement."
                 )
+
+        # ── Authorization: verify user can modify this project ───
+        if acting_user is not None:
+            if entity_type_lower == "project":
+                # Creating a project — only admin can create projects
+                # (non-admins get auto-granted manager after creation
+                #  in the GUI layer, but the create itself is allowed).
+                pass
+            else:
+                # Creating a child entity — user must have project access.
+                project_id = _get_project_id_for_entity(session, parent_id)
+                if project_id is not None:
+                    _assert_user_can_modify_project(session, acting_user, project_id)
 
         # ── Build the entity with base fields ────────────────────
         entity = cls(
@@ -728,6 +744,7 @@ def update_entity(
     entity_id: int,
     user_id: int,
     updates: Dict[str, Any],
+    acting_user=None,
 ) -> Optional[Entity]:
     """
     Update one or more fields on an existing entity.
@@ -740,20 +757,28 @@ def update_entity(
                       updates={"name": "New Name", "status": "approved"})
 
     Args:
-        entity_id:  Primary key of the entity to modify.
-        user_id:    The user performing the action.
-        updates:    Dict of {field_name: new_value} pairs.
+        entity_id:    Primary key of the entity to modify.
+        user_id:      The user performing the action.
+        updates:      Dict of {field_name: new_value} pairs.
+        acting_user:  User object for server-side authorization check.
 
     Returns:
         The updated Entity (detached), or None if not found.
 
     Raises:
         ValueError: If a field in `updates` doesn't exist on the entity.
+        PermissionError: If acting_user lacks project access.
     """
     with _session_scope() as session:
         entity = session.get(Entity, entity_id)
         if entity is None:
             return None
+
+        # ── Authorization ─────────────────────────────────────────
+        if acting_user is not None:
+            project_id = _get_project_id_for_entity(session, entity_id)
+            if project_id is not None:
+                _assert_user_can_modify_project(session, acting_user, project_id)
 
         # Snapshot the old values for the audit log's "details" field.
         old_values = {}
@@ -783,7 +808,7 @@ def update_entity(
         return entity
 
 
-def delete_entity(*, entity_id: int, user_id: int) -> bool:
+def delete_entity(*, entity_id: int, user_id: int, acting_user=None) -> bool:
     """
     Delete an entity and all its descendants (via ON DELETE CASCADE).
 
@@ -806,6 +831,12 @@ def delete_entity(*, entity_id: int, user_id: int) -> bool:
         entity = session.get(Entity, entity_id)
         if entity is None:
             return False
+
+        # ── Authorization ─────────────────────────────────────────
+        if acting_user is not None:
+            project_id = _get_project_id_for_entity(session, entity_id)
+            if project_id is not None:
+                _assert_user_can_modify_project(session, acting_user, project_id)
 
         # Snapshot identifying info before the object is gone.
         snapshot_type = entity.entity_type
@@ -845,12 +876,16 @@ def set_master_template_path(
     project_id: int,
     path: str,
     user_id: int,
+    acting_user=None,
 ) -> Optional[Project]:
     """Set or update the master_test_template_path on a Project."""
     with _session_scope() as session:
         project = session.get(Project, project_id)
         if project is None:
             return None
+
+        if acting_user is not None:
+            _assert_user_can_modify_project(session, acting_user, project_id)
 
         old_path = project.master_test_template_path
         project.master_test_template_path = path
@@ -901,12 +936,18 @@ def set_generated_test_path(
     requirement_id: int,
     path: Optional[str],
     user_id: int,
+    acting_user=None,
 ) -> None:
     """Set or clear the generated_test_file_path on a Requirement."""
     with _session_scope() as session:
         req = session.get(Requirement, requirement_id)
         if req is None:
             return
+
+        if acting_user is not None:
+            project_id = _get_project_id_for_entity(session, requirement_id)
+            if project_id is not None:
+                _assert_user_can_modify_project(session, acting_user, project_id)
 
         old_path = req.generated_test_file_path
         req.generated_test_file_path = path
@@ -932,6 +973,7 @@ def link_entities(
     source_id: int,
     target_id: int,
     user_id: int,
+    acting_user=None,
 ) -> EntityLink:
     """
     Create a directional link from source → target.
@@ -962,6 +1004,12 @@ def link_entities(
             raise ValueError(f"Source entity id={source_id} not found.")
         if target is None:
             raise ValueError(f"Target entity id={target_id} not found.")
+
+        # ── Authorization ─────────────────────────────────────────
+        if acting_user is not None:
+            project_id = _get_project_id_for_entity(session, source_id)
+            if project_id is not None:
+                _assert_user_can_modify_project(session, acting_user, project_id)
 
         link = EntityLink(
             source_entity_id=source_id,
@@ -994,6 +1042,7 @@ def unlink_entities(
     source_id: int,
     target_id: int,
     user_id: int,
+    acting_user=None,
 ) -> bool:
     """
     Remove a directional link from source → target.
@@ -1014,6 +1063,12 @@ def unlink_entities(
         link = session.execute(stmt).scalar_one_or_none()
         if link is None:
             return False
+
+        # ── Authorization ─────────────────────────────────────────
+        if acting_user is not None:
+            project_id = _get_project_id_for_entity(session, source_id)
+            if project_id is not None:
+                _assert_user_can_modify_project(session, acting_user, project_id)
 
         # Fetch entity names for the audit log before we delete the link.
         source = session.get(Entity, source_id)
@@ -1279,8 +1334,8 @@ def get_full_audit_log_for_display(limit: int = 200) -> List[Dict[str, Any]]:
 # ═══════════════════════════════════════════════════════════════════
 
 def is_admin(user) -> bool:
-    """Return True if the user is the administrator."""
-    return user.username == "admin"
+    """Return True if the user has the admin flag set."""
+    return getattr(user, "is_admin", False)
 
 
 def grant_project_access(
@@ -1289,6 +1344,7 @@ def grant_project_access(
     project_id: int,
     role: str = "member",
     granted_by_user_id: int,
+    acting_user=None,
 ) -> ProjectAccess:
     """
     Grant a user access to a project with the given role.
@@ -1305,6 +1361,22 @@ def grant_project_access(
         The ProjectAccess row (detached).
     """
     with _session_scope() as session:
+        # ── Authorization: only admin or project manager can grant ─
+        if acting_user is not None:
+            if not getattr(acting_user, "is_admin", False):
+                # Non-admin must be a manager for this project.
+                mgr_row = session.execute(
+                    select(ProjectAccess.id).where(
+                        ProjectAccess.user_id == acting_user.id,
+                        ProjectAccess.project_id == project_id,
+                        ProjectAccess.role == "manager",
+                    )
+                ).first()
+                if mgr_row is None:
+                    raise PermissionError(
+                        f"User '{acting_user.username}' is not a manager for project {project_id}."
+                    )
+
         existing = session.execute(
             select(ProjectAccess).where(
                 ProjectAccess.user_id == user_id,
@@ -1364,6 +1436,7 @@ def revoke_project_access(
     user_id: int,
     project_id: int,
     revoked_by_user_id: int,
+    acting_user=None,
 ) -> bool:
     """
     Remove a user's access to a project.
@@ -1371,6 +1444,21 @@ def revoke_project_access(
     Returns True if a row was deleted, False if none existed.
     """
     with _session_scope() as session:
+        # ── Authorization: only admin or project manager can revoke ─
+        if acting_user is not None:
+            if not getattr(acting_user, "is_admin", False):
+                mgr_row = session.execute(
+                    select(ProjectAccess.id).where(
+                        ProjectAccess.user_id == acting_user.id,
+                        ProjectAccess.project_id == project_id,
+                        ProjectAccess.role == "manager",
+                    )
+                ).first()
+                if mgr_row is None:
+                    raise PermissionError(
+                        f"User '{acting_user.username}' is not a manager for project {project_id}."
+                    )
+
         existing = session.execute(
             select(ProjectAccess).where(
                 ProjectAccess.user_id == user_id,
@@ -1517,3 +1605,343 @@ def get_all_db_managers() -> List[Dict[str, Any]]:
                 }
             managers[u.id]["project_ids"].append(pa.project_id)
         return list(managers.values())
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECURITY CODES  (email verification & password reset)
+# ═══════════════════════════════════════════════════════════════════
+
+def create_security_code(
+    *,
+    user_id: int,
+    purpose: str,
+    code: str,
+    lifetime_minutes: int = 15,
+) -> SecurityCode:
+    """
+    Create a security code for a user.  Invalidates any previous
+    unused codes for the same user + purpose.
+
+    Args:
+        user_id:           Target user.
+        purpose:           "email_verify" or "password_reset".
+        code:              The generated code string.
+        lifetime_minutes:  How long the code is valid (default 15 min).
+
+    Returns:
+        The new SecurityCode row (detached).
+    """
+    from datetime import timedelta
+
+    with _session_scope() as session:
+        # Invalidate any existing unused codes for this user + purpose.
+        stmt = select(SecurityCode).where(
+            SecurityCode.user_id == user_id,
+            SecurityCode.purpose == purpose,
+            SecurityCode.used == False,  # noqa: E712
+        )
+        old_codes = session.execute(stmt).scalars().all()
+        for oc in old_codes:
+            oc.used = True
+
+        now = datetime.now(timezone.utc)
+        sc = SecurityCode(
+            user_id=user_id,
+            code=code,
+            purpose=purpose,
+            created_at=now,
+            expires_at=now + timedelta(minutes=lifetime_minutes),
+        )
+        session.add(sc)
+        session.flush()
+        session.expunge(sc)
+        return sc
+
+
+def verify_security_code(
+    *,
+    user_id: int,
+    purpose: str,
+    code: str,
+) -> bool:
+    """
+    Check if a security code is valid (correct, unused, and not expired).
+
+    If valid, marks the code as used and returns True.
+    """
+    with _session_scope() as session:
+        now = datetime.now(timezone.utc)
+        stmt = select(SecurityCode).where(
+            SecurityCode.user_id == user_id,
+            SecurityCode.purpose == purpose,
+            SecurityCode.code == code,
+            SecurityCode.used == False,  # noqa: E712
+            SecurityCode.expires_at > now,
+        )
+        sc = session.execute(stmt).scalar_one_or_none()
+        if sc is None:
+            return False
+
+        sc.used = True
+        return True
+
+
+def mark_email_verified(user_id: int) -> bool:
+    """Set email_verified = True for the given user."""
+    with _session_scope() as session:
+        user = session.get(User, user_id)
+        if user is None:
+            return False
+        user.email_verified = True
+        return True
+
+
+def update_user_email(
+    *,
+    user_id: int,
+    new_email: str,
+    acting_user_id: int,
+) -> bool:
+    """Update a user's email address and reset their email_verified flag."""
+    with _session_scope() as session:
+        user = session.get(User, user_id)
+        if user is None:
+            return False
+
+        old_email = user.email
+        user.email = new_email
+        user.email_verified = False
+
+        _audit(
+            session,
+            action="UPDATE",
+            user_id=acting_user_id,
+            entity_id=user.id,
+            entity_type="user",
+            entity_name=user.username,
+            details={"field": "email", "old": old_email, "new": new_email},
+        )
+        return True
+
+
+def get_user_by_username(username: str) -> Optional[User]:
+    """Fetch a user by username. Returns None if not found."""
+    with _session_scope() as session:
+        stmt = select(User).where(User.username == username)
+        user = session.execute(stmt).scalar_one_or_none()
+        if user:
+            session.expunge(user)
+        return user
+
+
+# ═══════════════════════════════════════════════════════════════════
+# RECOVERY KEYS  (offline password reset)
+# ═══════════════════════════════════════════════════════════════════
+
+import secrets
+import string as _string
+
+
+def _generate_recovery_key_plaintext() -> str:
+    """Generate a recovery key in format FROG-XXXX-XXXX-XXXX."""
+    charset = _string.ascii_uppercase + _string.digits
+    segments = [
+        "".join(secrets.choice(charset) for _ in range(4))
+        for _ in range(3)
+    ]
+    return f"FROG-{segments[0]}-{segments[1]}-{segments[2]}"
+
+
+def generate_recovery_keys(
+    *,
+    user_id: int,
+    count: int = 5,
+) -> List[str]:
+    """
+    Generate a batch of recovery keys for a user.
+
+    Deletes any existing unused keys first (regeneration replaces old ones).
+    Returns the plaintext keys — these are shown ONCE to the user.
+    The database only stores hashed versions.
+
+    Args:
+        user_id:  The user to generate keys for.
+        count:    How many keys to generate (default 5).
+
+    Returns:
+        List of plaintext key strings (e.g. ["FROG-A8K2-M9X1-P4Q7", ...]).
+    """
+    from werkzeug.security import generate_password_hash
+
+    plaintext_keys = []
+
+    with _session_scope() as session:
+        # Delete existing unused keys (regeneration).
+        stmt = select(RecoveryKey).where(
+            RecoveryKey.user_id == user_id,
+            RecoveryKey.used == False,  # noqa: E712
+        )
+        old_keys = session.execute(stmt).scalars().all()
+        for ok in old_keys:
+            session.delete(ok)
+        session.flush()
+
+        # Generate new keys.
+        for _ in range(count):
+            plaintext = _generate_recovery_key_plaintext()
+            plaintext_keys.append(plaintext)
+
+            rk = RecoveryKey(
+                user_id=user_id,
+                key_hash=generate_password_hash(plaintext),
+            )
+            session.add(rk)
+
+        session.flush()
+
+        # Audit the generation (don't log the actual keys).
+        _audit(
+            session,
+            action="CREATE",
+            user_id=user_id,
+            entity_id=user_id,
+            entity_type="user",
+            entity_name=None,
+            details={"subject": "recovery_keys", "count": count},
+        )
+
+    return plaintext_keys
+
+
+def verify_recovery_key(
+    *,
+    user_id: int,
+    plaintext_key: str,
+) -> bool:
+    """
+    Check a recovery key against the user's stored hashes.
+
+    If a match is found, the key is marked as used and cannot be reused.
+    Returns True on success, False if no matching unused key exists.
+    """
+    from werkzeug.security import check_password_hash
+
+    # Normalise: strip whitespace, uppercase.
+    normalised = plaintext_key.strip().upper()
+
+    with _session_scope() as session:
+        stmt = select(RecoveryKey).where(
+            RecoveryKey.user_id == user_id,
+            RecoveryKey.used == False,  # noqa: E712
+        )
+        keys = session.execute(stmt).scalars().all()
+
+        for rk in keys:
+            if check_password_hash(rk.key_hash, normalised):
+                rk.used = True
+                rk.used_at = datetime.now(timezone.utc)
+
+                _audit(
+                    session,
+                    action="UPDATE",
+                    user_id=user_id,
+                    entity_id=user_id,
+                    entity_type="user",
+                    entity_name=None,
+                    details={"subject": "recovery_key_used"},
+                )
+                return True
+
+    return False
+
+
+def count_unused_recovery_keys(user_id: int) -> int:
+    """Return how many unused recovery keys a user has."""
+    with _session_scope() as session:
+        stmt = select(func.count(RecoveryKey.id)).where(
+            RecoveryKey.user_id == user_id,
+            RecoveryKey.used == False,  # noqa: E712
+        )
+        return session.execute(stmt).scalar() or 0
+
+
+def admin_reset_user_password(
+    *,
+    target_user_id: int,
+    new_temporary_password: str,
+    acting_user_id: int,
+) -> bool:
+    """
+    Admin-only: reset a user's password to a temporary value.
+
+    The user will be forced to change it on next login.
+
+    Args:
+        target_user_id:       The user being reset.
+        new_temporary_password: The temporary password to set.
+        acting_user_id:       The admin performing the reset.
+
+    Returns:
+        True on success, False if user not found.
+    """
+    with _session_scope() as session:
+        user = session.get(User, target_user_id)
+        if user is None:
+            return False
+
+        user.password_hash = generate_password_hash(new_temporary_password)
+        user.temporary_password = True
+
+        _audit(
+            session,
+            action="UPDATE",
+            user_id=acting_user_id,
+            entity_id=target_user_id,
+            entity_type="user",
+            entity_name=user.username,
+            details={"subject": "admin_password_reset"},
+        )
+        return True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# AUTHORIZATION HELPERS  (server-side enforcement)
+# ═══════════════════════════════════════════════════════════════════
+
+def _get_project_id_for_entity(session: Session, entity_id: int) -> Optional[int]:
+    """
+    Walk up the parent chain to find the top-level project ID
+    that an entity belongs to.  Returns None if the entity
+    doesn't exist or has no project ancestor.
+    """
+    visited = set()
+    current_id = entity_id
+    while current_id is not None and current_id not in visited:
+        visited.add(current_id)
+        entity = session.get(Entity, current_id)
+        if entity is None:
+            return None
+        if entity.entity_type == "project":
+            return entity.id
+        current_id = entity.parent_id
+    return None
+
+
+def _assert_user_can_modify_project(session: Session, user, project_id: int) -> None:
+    """
+    Raise PermissionError if the user lacks write access to the project.
+
+    Admin users always pass.  Other users must have a ProjectAccess row.
+    """
+    if getattr(user, "is_admin", False):
+        return
+    row = session.execute(
+        select(ProjectAccess.id).where(
+            ProjectAccess.user_id == user.id,
+            ProjectAccess.project_id == project_id,
+        )
+    ).first()
+    if row is None:
+        raise PermissionError(
+            f"User '{user.username}' does not have access to project {project_id}."
+        )

@@ -63,11 +63,15 @@ except ImportError:
     HAS_DARK_THEME = False
 
 from controllers.db_controllers import (
+    admin_reset_user_password,
+    count_unused_recovery_keys,
     create_entity,
+    generate_recovery_keys,
     get_accessible_projects,
     get_all_projects,
     get_project_access,
     get_user,
+    get_user_by_username,
     grant_project_access,
     init_engine,
     is_admin,
@@ -78,6 +82,12 @@ from controllers.db_controllers import (
     user_can_access_project,
 )
 from controllers.config_controller import get_custom_db_path, set_custom_db_path
+from controllers.email_controller import (
+    get_smtp_config,
+    is_smtp_configured,
+    save_smtp_config,
+    test_smtp_connection,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -203,7 +213,7 @@ class AccountDialog(QDialog):
     def __init__(self, user, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("Account Details")
-        self.setFixedSize(440, 480)
+        self.setFixedSize(440, 580)
         # Store a mutable reference — the caller passes the latest
         # User object; we update it if the save succeeds.
         self._user = user
@@ -266,6 +276,25 @@ class AccountDialog(QDialog):
         self.confirm_pw_input.setEchoMode(QLineEdit.Password)
         self.confirm_pw_input.setStyleSheet(INPUT_STYLE)
         layout.addWidget(self.confirm_pw_input)
+
+        # ── Recovery Keys section ──────────────────────────────────
+        rk_heading = QLabel("Recovery Keys")
+        rk_heading.setStyleSheet("font-weight: bold; padding-top: 8px; font-size: 13px;")
+        layout.addWidget(rk_heading)
+
+        unused = count_unused_recovery_keys(self._user.id)
+        self.rk_status = QLabel(f"You have {unused} unused recovery key(s) remaining.")
+        self.rk_status.setStyleSheet("color: #999; font-size: 12px; padding-bottom: 2px;")
+        layout.addWidget(self.rk_status)
+
+        self.regen_keys_btn = QPushButton("Regenerate Recovery Keys")
+        self.regen_keys_btn.setStyleSheet(DIALOG_BTN_STYLE)
+        self.regen_keys_btn.setCursor(Qt.PointingHandCursor)
+        self.regen_keys_btn.setToolTip(
+            "Generate a fresh set of 5 recovery keys (replaces any unused keys)"
+        )
+        self.regen_keys_btn.clicked.connect(self._on_regenerate_keys)
+        layout.addWidget(self.regen_keys_btn)
 
         # ── Feedback label ───────────────────────────────────────
         self.feedback = _make_feedback_label()
@@ -381,6 +410,34 @@ class AccountDialog(QDialog):
 
         # ── All saves succeeded — close the dialog ───────────────
         self.accept()
+
+    def _on_regenerate_keys(self):
+        """Generate a fresh set of recovery keys and display them."""
+        confirm = QMessageBox.question(
+            self,
+            "Regenerate Recovery Keys",
+            "This will invalidate all your current unused recovery keys\n"
+            "and generate 5 new ones.\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        try:
+            keys = generate_recovery_keys(user_id=self._user.id, count=5)
+        except Exception as exc:
+            _show_error(self.feedback, f"Failed to generate keys: {exc}")
+            return
+
+        # Show the keys using the shared dialog from auth_view.
+        from views.auth_view import RecoveryKeysDialog
+        dlg = RecoveryKeysDialog(keys, parent=self)
+        dlg.exec()
+
+        # Update the status label.
+        unused = count_unused_recovery_keys(self._user.id)
+        self.rk_status.setText(f"You have {unused} unused recovery key(s) remaining.")
 
     def get_updated_user(self):
         """Return the (possibly updated) User object after the dialog closes."""
@@ -1118,6 +1175,20 @@ class MainScreen(QMainWindow):
             self.manage_managers_btn.clicked.connect(self._on_manage_db_managers)
             layout.addWidget(self.manage_managers_btn)
 
+            self.smtp_btn = QPushButton("Email Settings")
+            self.smtp_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+            self.smtp_btn.setCursor(Qt.PointingHandCursor)
+            self.smtp_btn.setToolTip("Configure SMTP settings for email verification and password reset")
+            self.smtp_btn.clicked.connect(self._on_smtp_settings)
+            layout.addWidget(self.smtp_btn)
+
+            self.reset_user_pw_btn = QPushButton("Reset User Password")
+            self.reset_user_pw_btn.setStyleSheet(TOPBAR_BTN_STYLE)
+            self.reset_user_pw_btn.setCursor(Qt.PointingHandCursor)
+            self.reset_user_pw_btn.setToolTip("Reset a user's password to a temporary value")
+            self.reset_user_pw_btn.clicked.connect(self._on_reset_user_password)
+            layout.addWidget(self.reset_user_pw_btn)
+
         # Push everything else to the right.
         layout.addStretch(1)
 
@@ -1351,3 +1422,311 @@ class MainScreen(QMainWindow):
         """Open the Manage DB Managers dialog (admin-only)."""
         dialog = ManageDBManagersDialog(admin_user=self._user, parent=self)
         dialog.exec()
+
+    def _on_smtp_settings(self):
+        """Open the SMTP settings dialog (admin-only)."""
+        dialog = SmtpSettingsDialog(parent=self)
+        dialog.exec()
+
+    def _on_reset_user_password(self):
+        """Open the admin Reset User Password dialog."""
+        dialog = AdminResetPasswordDialog(admin_user=self._user, parent=self)
+        dialog.exec()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# DIALOG: Admin Reset User Password  (admin-only)
+# ═══════════════════════════════════════════════════════════════════
+
+class AdminResetPasswordDialog(QDialog):
+    """
+    Admin dialog for resetting another user's password to a temporary value.
+
+    The admin searches for a user by username, then sets a new temporary
+    password.  The target user will be forced to change the password on
+    next login.
+    """
+
+    def __init__(self, admin_user, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reset User Password")
+        self.setFixedSize(440, 380)
+        self._admin = admin_user
+        self._target_user = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        heading = QLabel("Reset User Password")
+        heading.setAlignment(Qt.AlignCenter)
+        font = QFont()
+        font.setPointSize(16)
+        font.setBold(True)
+        heading.setFont(font)
+        layout.addWidget(heading)
+
+        hint = QLabel(
+            "Look up a user by username and set a temporary password.\n"
+            "The user will be forced to change it on next login."
+        )
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #999; font-size: 12px; padding-bottom: 6px;")
+        layout.addWidget(hint)
+
+        # ── Username lookup ───────────────────────────────────────
+        layout.addWidget(QLabel("Username"))
+        lookup_row = QHBoxLayout()
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Enter username to look up")
+        self.username_input.setStyleSheet(INPUT_STYLE)
+        lookup_row.addWidget(self.username_input)
+
+        self.lookup_btn = QPushButton("Look Up")
+        self.lookup_btn.setStyleSheet(DIALOG_BTN_STYLE)
+        self.lookup_btn.setCursor(Qt.PointingHandCursor)
+        self.lookup_btn.clicked.connect(self._on_lookup)
+        lookup_row.addWidget(self.lookup_btn)
+        layout.addLayout(lookup_row)
+
+        self.user_info = QLabel("")
+        self.user_info.setStyleSheet("font-size: 13px; padding: 4px 0;")
+        self.user_info.setVisible(False)
+        layout.addWidget(self.user_info)
+
+        # ── New temporary password ────────────────────────────────
+        layout.addWidget(QLabel("New Temporary Password"))
+        self.new_pw_input = QLineEdit()
+        self.new_pw_input.setPlaceholderText("Temporary password for the user")
+        self.new_pw_input.setStyleSheet(INPUT_STYLE)
+        self.new_pw_input.setEnabled(False)
+        layout.addWidget(self.new_pw_input)
+
+        # ── Feedback + buttons ────────────────────────────────────
+        self.feedback = _make_feedback_label()
+        layout.addWidget(self.feedback)
+
+        btn_row = QHBoxLayout()
+        self.reset_btn = QPushButton("Reset Password")
+        self.reset_btn.setStyleSheet(DIALOG_BTN_STYLE)
+        self.reset_btn.setCursor(Qt.PointingHandCursor)
+        self.reset_btn.setEnabled(False)
+        self.reset_btn.clicked.connect(self._on_reset)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(self.reset_btn)
+        layout.addLayout(btn_row)
+
+    def _on_lookup(self):
+        _clear_feedback(self.feedback)
+        username = self.username_input.text().strip()
+        if not username:
+            _show_error(self.feedback, "Please enter a username.")
+            return
+
+        user = get_user_by_username(username)
+        if user is None:
+            _show_error(self.feedback, f"No user found with username '{username}'.")
+            self._target_user = None
+            self.new_pw_input.setEnabled(False)
+            self.reset_btn.setEnabled(False)
+            self.user_info.setVisible(False)
+            return
+
+        if user.id == self._admin.id:
+            _show_error(self.feedback, "You cannot reset your own password here.\nUse the Account dialog instead.")
+            return
+
+        self._target_user = user
+        self.user_info.setText(
+            f"Found: {user.display_name} ({user.username}) — ID {user.id}"
+        )
+        self.user_info.setVisible(True)
+        self.new_pw_input.setEnabled(True)
+        self.reset_btn.setEnabled(True)
+        self.new_pw_input.setFocus()
+
+    def _on_reset(self):
+        _clear_feedback(self.feedback)
+        if self._target_user is None:
+            _show_error(self.feedback, "Please look up a user first.")
+            return
+
+        new_pw = self.new_pw_input.text().strip()
+        if not new_pw:
+            _show_error(self.feedback, "Please enter a temporary password.")
+            self.new_pw_input.setFocus()
+            return
+        if len(new_pw) < 6:
+            _show_error(self.feedback, "Password must be at least 6 characters.")
+            self.new_pw_input.setFocus()
+            return
+
+        try:
+            ok = admin_reset_user_password(
+                target_user_id=self._target_user.id,
+                new_temporary_password=new_pw,
+                acting_user_id=self._admin.id,
+            )
+        except Exception as exc:
+            _show_error(self.feedback, f"Reset failed: {exc}")
+            return
+
+        if ok:
+            QMessageBox.information(
+                self,
+                "Password Reset",
+                f"Password for '{self._target_user.username}' has been reset.\n\n"
+                f"Temporary password: {new_pw}\n\n"
+                "The user will be required to change it on next login.",
+            )
+            self.accept()
+        else:
+            _show_error(self.feedback, "Reset failed — user not found.")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# DIALOG: SMTP Email Settings  (admin-only)
+# ═══════════════════════════════════════════════════════════════════
+
+class SmtpSettingsDialog(QDialog):
+    """Dialog for configuring SMTP settings used for email verification
+    and password reset codes."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Email (SMTP) Settings")
+        self.setMinimumWidth(450)
+        self._build_ui()
+        self._load_existing()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel(
+            "Configure SMTP settings for sending verification and\n"
+            "password reset emails. These settings are saved locally."
+        ))
+
+        # ── SMTP fields ──────────────────────────────────────────
+        self.host_input = QLineEdit()
+        self.host_input.setPlaceholderText("SMTP Host (e.g. smtp.gmail.com)")
+        layout.addWidget(QLabel("SMTP Host:"))
+        layout.addWidget(self.host_input)
+
+        self.port_input = QLineEdit()
+        self.port_input.setPlaceholderText("Port (e.g. 587)")
+        layout.addWidget(QLabel("Port:"))
+        layout.addWidget(self.port_input)
+
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("SMTP Username / Email")
+        layout.addWidget(QLabel("Username:"))
+        layout.addWidget(self.username_input)
+
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("SMTP Password / App Password")
+        self.password_input.setEchoMode(QLineEdit.Password)
+        layout.addWidget(QLabel("Password:"))
+        layout.addWidget(self.password_input)
+
+        self.sender_input = QLineEdit()
+        self.sender_input.setPlaceholderText("Sender email address (From:)")
+        layout.addWidget(QLabel("Sender Email:"))
+        layout.addWidget(self.sender_input)
+
+        # ── TLS checkbox (using a button toggle for simplicity) ──
+        from PySide6.QtWidgets import QCheckBox
+        self.tls_checkbox = QCheckBox("Use TLS (recommended)")
+        self.tls_checkbox.setChecked(True)
+        layout.addWidget(self.tls_checkbox)
+
+        # ── Feedback ──────────────────────────────────────────────
+        self.feedback = QLabel("")
+        self.feedback.setWordWrap(True)
+        self.feedback.setVisible(False)
+        layout.addWidget(self.feedback)
+
+        # ── Buttons ───────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+
+        self.test_btn = QPushButton("Test Connection")
+        self.test_btn.clicked.connect(self._on_test)
+        btn_row.addWidget(self.test_btn)
+
+        self.save_btn = QPushButton("Save")
+        self.save_btn.clicked.connect(self._on_save)
+        btn_row.addWidget(self.save_btn)
+
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
+        btn_row.addWidget(self.close_btn)
+
+        layout.addLayout(btn_row)
+
+    def _load_existing(self):
+        """Pre-fill fields from existing config."""
+        smtp = get_smtp_config()
+        if smtp:
+            self.host_input.setText(smtp.get("host", ""))
+            self.port_input.setText(str(smtp.get("port", "")))
+            self.username_input.setText(smtp.get("username", ""))
+            self.password_input.setText(smtp.get("password", ""))
+            self.sender_input.setText(smtp.get("sender_email", ""))
+            self.tls_checkbox.setChecked(smtp.get("use_tls", True))
+
+    def _show_feedback(self, message: str, is_error: bool = False):
+        color = "#e74c3c" if is_error else "#2ecc71"
+        self.feedback.setStyleSheet(f"color: {color}; font-size: 13px;")
+        self.feedback.setText(message)
+        self.feedback.setVisible(True)
+
+    def _gather_values(self) -> dict:
+        port_text = self.port_input.text().strip()
+        try:
+            port = int(port_text) if port_text else 587
+        except ValueError:
+            port = 587
+        return {
+            "host": self.host_input.text().strip(),
+            "port": port,
+            "username": self.username_input.text().strip(),
+            "password": self.password_input.text(),
+            "sender_email": self.sender_input.text().strip(),
+            "use_tls": self.tls_checkbox.isChecked(),
+        }
+
+    def _on_save(self):
+        vals = self._gather_values()
+        if not vals["host"]:
+            self._show_feedback("SMTP host is required.", is_error=True)
+            return
+        if not vals["sender_email"]:
+            self._show_feedback("Sender email is required.", is_error=True)
+            return
+
+        save_smtp_config(**vals)
+        self._show_feedback("SMTP settings saved successfully.")
+
+    def _on_test(self):
+        """Save current values and test the connection."""
+        vals = self._gather_values()
+        if not vals["host"]:
+            self._show_feedback("Enter SMTP host first.", is_error=True)
+            return
+
+        # Save before testing so test_smtp_connection reads the config.
+        save_smtp_config(**vals)
+        self._show_feedback("Testing connection...", is_error=False)
+        QApplication.processEvents()
+
+        ok, msg = test_smtp_connection()
+        self._show_feedback(msg, is_error=not ok)
