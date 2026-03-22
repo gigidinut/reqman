@@ -48,6 +48,27 @@ def _collect_tree(parent_id: int, depth: int = 0) -> list:
     return result
 
 
+def _assign_numbers(tree: list) -> list:
+    """Add hierarchical numbering to a flat tree list.
+
+    Takes a list of (entity, depth) tuples from _collect_tree() and returns
+    a list of (entity, depth, number_str) tuples where number_str is like
+    "1.", "1.1.", "1.1.2.", etc.
+    """
+    counters = []
+    result = []
+    for entity, depth in tree:
+        # Grow counters list if needed.
+        while len(counters) <= depth:
+            counters.append(0)
+        # Trim counters deeper than current depth (resets child numbering).
+        counters = counters[: depth + 1]
+        counters[depth] += 1
+        number_str = ".".join(str(c) for c in counters) + "."
+        result.append((entity, depth, number_str))
+    return result
+
+
 def _strip_html(text: Optional[str]) -> str:
     """Convert HTML to plain text by stripping tags."""
     if not text:
@@ -238,21 +259,20 @@ def export_txt(project, filepath: str) -> None:
     lines.append(f"{'=' * 60}")
     lines.append("")
 
-    tree = _collect_tree(project.id)
-    for entity, depth in tree:
+    tree = _assign_numbers(_collect_tree(project.id))
+    for entity, depth, number in tree:
         indent = "    " * depth
-        type_tag = f"[{_entity_label(entity)}]"
 
         if entity.entity_type == "requirement":
             req_id = getattr(entity, "req_id", "") or ""
             id_part = f"{req_id} — " if req_id else ""
-            lines.append(f"{indent}{type_tag} {id_part}{entity.name}")
+            lines.append(f"{indent}{number}    {id_part}{entity.name}")
             body = _strip_html(getattr(entity, "body", None))
             if body:
                 for bline in body.splitlines():
                     lines.append(f"{indent}    {bline}")
         else:
-            lines.append(f"{indent}{type_tag} {entity.name}")
+            lines.append(f"{indent}{number}    {entity.name}")
             desc = _strip_html(entity.description)
             if desc:
                 for dline in desc.splitlines():
@@ -269,17 +289,18 @@ def export_txt(project, filepath: str) -> None:
 
 def export_csv(project, filepath: str) -> None:
     """Export all entities as a flat CSV table."""
-    tree = _collect_tree(project.id)
+    tree = _assign_numbers(_collect_tree(project.id))
 
     with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "Depth", "Type", "Name", "Req ID", "Status",
+            "Number", "Depth", "Type", "Name", "Req ID", "Status",
             "Description", "Body", "Priority", "Rationale",
         ])
 
-        for entity, depth in tree:
+        for entity, depth, number in tree:
             writer.writerow([
+                number,
                 depth,
                 _entity_label(entity),
                 entity.name,
@@ -363,13 +384,13 @@ def export_docx(project, filepath: str) -> None:
     doc.add_paragraph("")  # spacer
 
     # ── Recursive content ─────────────────────────────────────────
-    tree = _collect_tree(project.id)
-    for entity, depth in tree:
+    tree = _assign_numbers(_collect_tree(project.id))
+    for entity, depth, number in tree:
         if entity.entity_type == "requirement":
-            _docx_add_requirement(doc, entity, depth)
+            _docx_add_requirement(doc, entity, depth, number)
         else:
             heading_level = min(depth + 1, 9)  # Word supports heading 1-9
-            doc.add_heading(f"{entity.name}", level=heading_level)
+            doc.add_heading(f"{number}    {entity.name}", level=heading_level)
 
             if entity.description:
                 _docx_add_rich_content(
@@ -382,7 +403,7 @@ def export_docx(project, filepath: str) -> None:
     doc.save(filepath)
 
 
-def _docx_add_requirement(doc, entity, depth: int):
+def _docx_add_requirement(doc, entity, depth: int, number: str = ""):
     """Add a requirement entry to the Word document."""
     from docx.shared import Pt, RGBColor
 
@@ -391,7 +412,7 @@ def _docx_add_requirement(doc, entity, depth: int):
 
     # Requirement heading-style paragraph.
     p = doc.add_paragraph()
-    run = p.add_run(f"[REQ] {label}")
+    run = p.add_run(f"{number}    {label}")
     run.bold = True
     run.font.size = Pt(11)
     run.font.color.rgb = RGBColor(175, 122, 197)
@@ -558,8 +579,8 @@ def export_pdf(project, filepath: str) -> None:
     ))
 
     # ── Recursive content ─────────────────────────────────────────
-    tree = _collect_tree(project.id)
-    for entity, depth in tree:
+    tree = _assign_numbers(_collect_tree(project.id))
+    for entity, depth, number in tree:
         if entity.entity_type == "requirement":
             req_id = getattr(entity, "req_id", "") or ""
             label = f"{req_id} &mdash; {entity.name}" if req_id else entity.name
@@ -568,7 +589,7 @@ def export_pdf(project, filepath: str) -> None:
                 parent=req_header_style,
                 leftIndent=depth * 18,
             )
-            story.append(Paragraph(f"<b>[REQ]</b> {label}", rstyle))
+            story.append(Paragraph(f"<b>{number}</b>    {label}", rstyle))
 
             body = getattr(entity, "body", None)
             if body:
@@ -577,7 +598,7 @@ def export_pdf(project, filepath: str) -> None:
                 ))
         else:
             hs = _heading_style(depth)
-            story.append(Paragraph(entity.name, hs))
+            story.append(Paragraph(f"{number}    {entity.name}", hs))
             if entity.description:
                 story.extend(_pdf_rich_flowables(
                     entity.description, desc_style, left_indent=depth * 18 + 6,
@@ -651,8 +672,8 @@ def export_reqif(project, filepath: str) -> None:
 
     # ── Spec objects ──────────────────────────────────────────────
     spec_objects = ET.SubElement(content, "SPEC-OBJECTS")
-    tree = _collect_tree(project.id)
-    for entity, depth in tree:
+    tree = _assign_numbers(_collect_tree(project.id))
+    for entity, depth, number in tree:
         so = ET.SubElement(
             spec_objects, "SPEC-OBJECT",
             IDENTIFIER=f"SO-{entity.id}", LONG_NAME=entity.name,

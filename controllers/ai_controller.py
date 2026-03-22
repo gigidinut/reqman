@@ -1,7 +1,7 @@
 """
 ai_controller.py — Local LLM inference for requirement quality evaluation.
 
-Uses `llama-cpp-python` to run a quantised Llama 3.2 1B Instruct model
+Uses `llama-cpp-python` to run a quantised Gemma 2 2B Instruct model
 on the CPU.  The model file is resolved dynamically relative to the
 application root directory at:  <app_root>/ai_model/<model_file>.
 
@@ -44,7 +44,7 @@ _APP_ROOT = Path(__file__).resolve().parent.parent
 
 # Model file path — relative to the application root.
 MODEL_DIR = _APP_ROOT / "ai_model"
-MODEL_FILENAME = "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+MODEL_FILENAME = "gemma-2-2b-it-Q4_K_M.gguf"
 MODEL_PATH = MODEL_DIR / MODEL_FILENAME
 
 
@@ -53,17 +53,22 @@ MODEL_PATH = MODEL_DIR / MODEL_FILENAME
 # ═══════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT = (
-    "You are a ruthless expert Systems Engineer strictly grading technical requirements "
-    "based on INCOSE best practices. A high-quality requirement must be atomic "
-    "(one single thought), unambiguous, verifiable (testable), concise, and "
-    "implementation-free (stating WHAT is required, not HOW to implement it). "
-    "Subtract at least 2 points from the score for each missing characteristic of the"
-    "Analyze the requirement provided. DO NOT rewrite it. DO NOT suggest a fix. "
-    "Your grading MUST be strict and thorough, do NOT over-inflate the score, be very harsh with scoring."
-    "Output exactly two lines. "
-    "Line 1 must be 'SCORE: X/10'. "
-    "Line 2 must be 'CRITIQUE: [Detail the exact violations of clarity, "
-    "verifiability, or atomicity].'"
+    "You are a ruthless expert Systems Engineer strictly grading technical requirements based on INCOSE standards."
+    "Evaluate the requirement against these 5 strict criteria:"
+    "1. Verifiable: Must be quantifiable (numbers, units, tolerances). Cannot reference specific test procedures."
+    "2. Unambiguous: Must not contain vague words (e.g., 'robust', 'fast', 'user-friendly', 'sufficient')."
+    "3. Atomic: Must contain only one single obligation (one 'shall'). No 'and/or' joining multiple thoughts."
+    "4. Implementation-Free: Must state WHAT the system shall do, never HOW it will be designed or built."
+    "5. Complete: Must include the operational conditions or environment if applicable."
+    "Rules for your response:"
+    "- Be exceedingly harsh. Most requirements contain flaws and should score below 6/10."
+    "- Base your score on the 5 criteria. Deduct 2 points for every criterion the requirement fails."
+    "- Do not provide conversational filler."
+    "- Do not rewrite the requirement."
+    "- Do not suggest a fix."
+    "You must output exactly two lines in the following exact format:"
+    "SCORE: [Number]/10"
+    "CRITIQUE:[Provide a harsh, detailed paragraph explaining exactly which of the 5 criteria were violated and why.]"
 )
 
 
@@ -174,15 +179,17 @@ class AiWorker(QThread):
             # verbose=False suppresses llama.cpp's own logging.
             llm = Llama(
                 model_path=str(MODEL_PATH),
-                n_ctx=1024,
-                n_gpu_layers=0,
+                n_ctx=2048,
+                n_gpu_layers=-1,
                 verbose=False,
             )
 
             # ── Build the prompt using chat format ───────────────
+            # Gemma 2 does not support the "system" role, so we
+            # prepend the system prompt to the user message instead.
+            user_content = SYSTEM_PROMPT + "\n\n" + self._body.strip()
             messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": self._body.strip()},
+                {"role": "user", "content": user_content},
             ]
 
             # ── Run inference ────────────────────────────────────

@@ -175,7 +175,7 @@ def create_user(
     *,
     username: str,
     display_name: str,
-    email: str,
+    email: str = "",
     password: str,
     temporary_password: bool = True,
     acting_user_id: Optional[int] = None,
@@ -189,7 +189,7 @@ def create_user(
     Args:
         username:            Unique login name.
         display_name:        Human-friendly name shown in the UI.
-        email:               User's email address (required).
+        email:               User's email address (optional).
         password:            Plaintext password (will be hashed before storage).
         temporary_password:  If True, the user must change password on next login.
         acting_user_id:      ID of the admin creating this account (None for

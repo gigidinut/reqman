@@ -1125,25 +1125,38 @@ class ProjectScreen(QMainWindow):
 
         # ── Recurse through the hierarchy ────────────────────────
         children = get_children(self._project.id)
+        counters = [0]  # sibling counter per depth level
         for child in children:
-            self._render_entity_to_html(child, html_parts, depth=1)
+            self._render_entity_to_html(child, html_parts, depth=1,
+                                        counters=counters)
 
         html_parts.append("</div>")
         full_html = "\n".join(html_parts)
         self.doc_browser.setHtml(full_html)
 
-    def _render_entity_to_html(self, entity, parts: list, depth: int):
+    def _render_entity_to_html(self, entity, parts: list, depth: int,
+                               counters: list = None):
         """Recursively render an entity and its children into HTML parts.
 
         Each depth level adds 24px of left-indentation, mirroring the
-        tree view's visual hierarchy.
+        tree view's visual hierarchy.  *counters* tracks sibling indices
+        at each depth to produce hierarchical numbering (1., 1.1., …).
         """
-        info = ENTITY_DISPLAY.get(entity.entity_type, {})
-        icon = info.get("icon", "")
+        if counters is None:
+            counters = [0]
+
+        # ── Build the hierarchical number ────────────────────────
+        # Ensure counters has exactly *depth* slots, then increment.
+        while len(counters) < depth:
+            counters.append(0)
+        del counters[depth:]
+        counters[depth - 1] += 1
+        number = ".".join(str(c) for c in counters) + "."
+
         indent = (depth - 1) * 24
 
         if entity.entity_type == "requirement":
-            self._render_requirement_to_html(entity, parts, indent)
+            self._render_requirement_to_html(entity, parts, indent, number)
         else:
             # ── Section header ───────────────────────────────────
             header_styles = {
@@ -1158,7 +1171,7 @@ class ProjectScreen(QMainWindow):
             tag = f"h{min(depth, 3)}"
             parts.append(
                 f"<div style='margin-left: {indent}px;'>"
-                f"<{tag} style='{style}'>{icon} {entity.name}</{tag}>"
+                f"<{tag} style='{style}'>{number}&nbsp;&nbsp;&nbsp;&nbsp;{entity.name}</{tag}>"
             )
 
             # ── Description (rich text HTML) ─────────────────────
@@ -1176,9 +1189,11 @@ class ProjectScreen(QMainWindow):
             # ── Recurse into children ────────────────────────────
             children = get_children(entity.id)
             for child in children:
-                self._render_entity_to_html(child, parts, depth + 1)
+                self._render_entity_to_html(child, parts, depth + 1,
+                                            counters)
 
-    def _render_requirement_to_html(self, entity, parts: list, indent: int):
+    def _render_requirement_to_html(self, entity, parts: list, indent: int,
+                                     number: str = ""):
         """Render a single requirement as a styled box in the document."""
         from views.rich_text_editor import _html_from_storage
 
@@ -1186,9 +1201,10 @@ class ProjectScreen(QMainWindow):
         if hasattr(entity, "req_id") and entity.req_id:
             req_id = entity.req_id
 
-        # ── Header line: ID + Name ───────────────────────────────
-        header = f"<b>{req_id}</b>" if req_id else ""
-        header += f"  {entity.name}" if header else f"<b>{entity.name}</b>"
+        # ── Header line: Number + ID + Name ──────────────────────
+        number_part = f"<b>{number}</b>&nbsp;&nbsp;&nbsp;&nbsp;" if number else ""
+        header = f"{number_part}<b>{req_id}</b>" if req_id else f"{number_part}"
+        header += f"  {entity.name}" if req_id else f"<b>{entity.name}</b>"
 
         # ── Body (rich text) ─────────────────────────────────────
         body_html = ""

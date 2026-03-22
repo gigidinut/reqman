@@ -385,7 +385,7 @@ class CreateAccountScreen(QWidget):
         # ── Registration fields ───────────────────────────────────
         self.username_input = _make_input("Username")
         self.display_name_input = _make_input("Display Name")
-        self.email_input = _make_input("Email Address")
+        self.email_input = _make_input("Email Address (optional)")
         self.password_input = _make_input("Password", is_password=True)
         self.confirm_input = _make_input("Confirm Password", is_password=True)
 
@@ -460,11 +460,7 @@ class CreateAccountScreen(QWidget):
             _show_error(self.feedback, "Display name is required.")
             self.display_name_input.setFocus()
             return
-        if not email:
-            _show_error(self.feedback, "Email address is required.")
-            self.email_input.setFocus()
-            return
-        if not _validate_email(email):
+        if email and not _validate_email(email):
             _show_error(self.feedback, "Please enter a valid email address.")
             self.email_input.setFocus()
             return
@@ -516,7 +512,9 @@ class CreateAccountScreen(QWidget):
         self.create_btn.setVisible(False)
         _clear_feedback(self.feedback)
 
-        if is_smtp_configured():
+        has_email = bool(self._created_user.email and self._created_user.email.strip())
+
+        if has_email and is_smtp_configured():
             # Send a verification code.
             self._subheading.setText(
                 f"Account created! A verification code has been\n"
@@ -528,12 +526,8 @@ class CreateAccountScreen(QWidget):
             self.skip_verify_btn.setVisible(True)
             self._send_verification_code()
         else:
-            # SMTP not configured — skip email verification.
-            self._subheading.setText(
-                "Account created!\n"
-                "Email verification is not available (SMTP not configured).\n"
-                "You can verify your email later from Account settings."
-            )
+            # No email provided or SMTP not configured — skip to recovery keys.
+            self._subheading.setText("Account created!")
             self._finish_with_recovery_keys()
 
     def _send_verification_code(self) -> bool:
@@ -1054,13 +1048,13 @@ class ChangePasswordScreen(QWidget):
 
     def set_user(self, user):
         self._user = user
-        # Show email fields for admin users who don't have a verified email.
-        needs_email = (
+        # Show email fields as optional for admin users without a verified email.
+        show_email = (
             user is not None
             and getattr(user, "is_admin", False)
             and not getattr(user, "email_verified", False)
         )
-        self._show_email_section(needs_email)
+        self._show_email_section(show_email)
 
     def _show_email_section(self, show: bool):
         """Toggle visibility of the email setup fields."""
@@ -1072,8 +1066,8 @@ class ChangePasswordScreen(QWidget):
         if show:
             self._subheading.setText(
                 "Your password is temporary.\n"
-                "Please set a new password and configure your email\n"
-                "for account recovery."
+                "Please set a new password. You may optionally\n"
+                "provide an email for account recovery."
             )
         else:
             self._subheading.setText(
@@ -1269,19 +1263,6 @@ class ChangePasswordScreen(QWidget):
             return
         if self._user is None:
             _show_error(self.feedback, "Internal error: no user context. Please log in again.")
-            return
-
-        # For admin users, check that email was handled.
-        needs_email = (
-            getattr(self._user, "is_admin", False)
-            and not getattr(self._user, "email_verified", False)
-        )
-        if needs_email and not self._email_verified:
-            _show_error(
-                self.feedback,
-                "Please set up and verify your email address first,\n"
-                "or click 'Send verification code' to begin.",
-            )
             return
 
         try:
