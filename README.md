@@ -16,7 +16,7 @@ A desktop application for managing engineering requirements, built with Python a
 - Attach test plan files and external ticket links (clickable from the detail view)
 
 ### AI-Powered Analysis (Local)
-- Analyse requirement quality against best practices using a local Llama model (no data leaves your machine)
+- Analyse requirement quality against best practices using a local AI model (no data leaves your machine)
 - Generate test templates from requirements with overwrite protection
 
 ### Export
